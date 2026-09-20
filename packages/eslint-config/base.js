@@ -25,6 +25,7 @@ export default [
           "**/vitest.config.*",
           "**/vite.config.*",
           "**/electron.vite.config.*",
+          "**/open-next.config.*",
           "**/eslint.config.*",
           "**/scripts/**",
           "**/src/main/**",
