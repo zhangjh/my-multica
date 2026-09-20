@@ -973,5 +973,33 @@
   "actions": {
     "selected_other": "{{count}}개 선택됨",
     "clear_selection": "선택 해제"
+  },
+  "export_import": {
+    "menu": "가져오기 / 내보내기",
+    "export_action": "에이전트 내보내기",
+    "export_downloading": "내보내는 중…",
+    "export_error": "내보내기 실패: {{message}}",
+    "import_action": "에이전트 가져오기",
+    "import_dialog_title": "에이전트 가져오기",
+    "import_dialog_description": "multica-agent-export JSON 파일을 선택해 이 워크스페이스에 에이전트를 복원하세요. 사용자 지정 환경 변수와 MCP 설정을 포함한 에이전트 구성은 그대로 복원됩니다.",
+    "import_file_label": "내보내기 파일",
+    "import_file_empty": "파일을 선택하지 않음",
+    "import_invalid_file": "multica 에이전트 내보내기 파일이 아닌 것 같습니다.",
+    "import_conflict_label": "에이전트 이름이 이미 존재하는 경우",
+    "import_conflict_skip": "건너뛰기",
+    "import_conflict_fail": "중단하고 보고",
+    "import_conflict_rename": "“(imported)”를 붙여 생성",
+    "import_runtime_label": "기본 런타임(선택)",
+    "import_runtime_placeholder": "각 에이전트의 런타임 사용",
+    "import_submit": "에이전트 {{count}}개 가져오기",
+    "import_submitting": "가져오는 중…",
+    "import_report_title": "가져오기 결과",
+    "import_report_done": "완료",
+    "import_status_created": "생성됨",
+    "import_status_renamed": "이름 변경됨",
+    "import_status_skipped": "건너뜀",
+    "import_status_failed": "실패",
+    "import_error": "가져오기 실패: {{message}}",
+    "import_cancel": "취소"
   }
 }

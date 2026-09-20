@@ -2080,6 +2080,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				// cannot mint an agent carrying `system_key` and thereby claim
 				// the system instruction layer. Idempotent per workspace.
 				r.Post("/mika", h.CreateMikaAgent)
+				// Portable agent configuration export/import. Both endpoints
+				// are workspace owner/admin only and deny agent actors;
+				// they operate on the whole workspace at once rather than a
+				// single {id}. See internal/handler/agent_export_import.go.
+				r.Get("/export", h.ExportAgents)
+				r.Post("/import", h.ImportAgents)
 				r.Route("/{id}", func(r chi.Router) {
 					r.Get("/", h.GetAgent)
 					r.Put("/", h.UpdateAgent)

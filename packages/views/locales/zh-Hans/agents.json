@@ -973,5 +973,33 @@
   "actions": {
     "selected_other": "已选 {{count}} 项",
     "clear_selection": "清除选择"
+  },
+  "export_import": {
+    "menu": "导入 / 导出",
+    "export_action": "导出智能体",
+    "export_downloading": "导出中…",
+    "export_error": "导出失败：{{message}}",
+    "import_action": "导入智能体",
+    "import_dialog_title": "导入智能体",
+    "import_dialog_description": "选择 multica-agent-export JSON 文件，将智能体恢复到当前空间。包括自定义环境变量与 MCP 配置在内的智能体配置将按原样恢复。",
+    "import_file_label": "导出文件",
+    "import_file_empty": "未选择文件",
+    "import_invalid_file": "该文件不是有效的 multica 智能体导出。",
+    "import_conflict_label": "如果智能体名称已存在",
+    "import_conflict_skip": "跳过",
+    "import_conflict_fail": "停止并报错",
+    "import_conflict_rename": "追加“（导入）”后创建",
+    "import_runtime_label": "默认运行环境（可选）",
+    "import_runtime_placeholder": "使用各智能体自身的运行环境",
+    "import_submit": "导入 {{count}} 个智能体",
+    "import_submitting": "导入中…",
+    "import_report_title": "导入结果",
+    "import_report_done": "完成",
+    "import_status_created": "已创建",
+    "import_status_renamed": "已重命名",
+    "import_status_skipped": "已跳过",
+    "import_status_failed": "失败",
+    "import_error": "导入失败：{{message}}",
+    "import_cancel": "取消"
   }
 }

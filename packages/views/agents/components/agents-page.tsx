@@ -70,6 +70,10 @@ import {
 import { availabilityConfig } from "../presence";
 import { AgentRowActions } from "./agent-row-actions";
 import {
+  AgentExportImportActions,
+  AgentImportDialog,
+} from "./agent-export-import";
+import {
   AgentListToolbar,
   countActiveFilterDimensions,
 } from "./agent-list-toolbar";
@@ -251,9 +255,13 @@ export interface AgentsPageProps {
 function PageHeaderBar({
   totalCount,
   onCreate,
+  isAdmin,
+  onImport,
 }: {
   totalCount: number;
   onCreate: () => void;
+  isAdmin?: boolean;
+  onImport?: () => void;
 }) {
   const { t } = useT("agents");
   return (
@@ -267,11 +275,16 @@ function PageHeaderBar({
         label: t(($) => $.page.learn_more),
       }}
       actions={
-        <CollectionPageHeaderAction
-          icon={Plus}
-          label={t(($) => $.page.new_agent)}
-          onClick={onCreate}
-        />
+        <>
+          {isAdmin && onImport ? (
+            <AgentExportImportActions onImportRequest={onImport} />
+          ) : null}
+          <CollectionPageHeaderAction
+            icon={Plus}
+            label={t(($) => $.page.new_agent)}
+            onClick={onCreate}
+          />
+        </>
       }
     />
   );
@@ -797,6 +810,7 @@ export function AgentsPage(_props: AgentsPageProps = {}) {
     new Set(),
   );
   const [search, setSearch] = useState("");
+  const [importOpen, setImportOpen] = useState(false);
 
   const rawScope = useAgentsViewStore((s) => s.scope);
   const scope = AGENT_SCOPES.includes(rawScope) ? rawScope : "mine";
@@ -1038,6 +1052,8 @@ export function AgentsPage(_props: AgentsPageProps = {}) {
       <PageHeaderBar
         totalCount={totalCount}
         onCreate={() => navigation.push(paths.newAgent())}
+        isAdmin={isWorkspaceAdmin}
+        onImport={() => setImportOpen(true)}
       />
 
       {isLoading || (!showEmpty && !listReady) ? (
@@ -1192,6 +1208,8 @@ export function AgentsPage(_props: AgentsPageProps = {}) {
         currentUserId={currentUser?.id ?? null}
         onClear={() => setSelectedIds(new Set())}
       />
+
+      <AgentImportDialog open={importOpen} onOpenChange={setImportOpen} />
 
     </div>
   );

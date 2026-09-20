@@ -995,5 +995,33 @@
     "selected_one": "{{count}} selected",
     "selected_other": "{{count}} selected",
     "clear_selection": "Clear selection"
+  },
+  "export_import": {
+    "menu": "Import / Export",
+    "export_action": "Export agents",
+    "export_downloading": "Exporting…",
+    "export_error": "Export failed: {{message}}",
+    "import_action": "Import agents",
+    "import_dialog_title": "Import agents",
+    "import_dialog_description": "Choose a multica-agent-export JSON file to restore agents into this workspace. Agent configuration, including custom environment variables and MCP config, is restored as-is.",
+    "import_file_label": "Export file",
+    "import_file_empty": "No file chosen",
+    "import_invalid_file": "That file doesn't look like a multica agent export.",
+    "import_conflict_label": "If an agent name already exists",
+    "import_conflict_skip": "Skip it",
+    "import_conflict_fail": "Stop and report",
+    "import_conflict_rename": "Append “(imported)” to the new agent's name",
+    "import_runtime_label": "Default runtime (optional)",
+    "import_runtime_placeholder": "Use each agent's own runtime",
+    "import_submit": "Import {{count}} agents",
+    "import_submitting": "Importing…",
+    "import_report_title": "Import results",
+    "import_report_done": "Done",
+    "import_status_created": "Created",
+    "import_status_renamed": "Renamed",
+    "import_status_skipped": "Skipped",
+    "import_status_failed": "Failed",
+    "import_error": "Import failed: {{message}}",
+    "import_cancel": "Cancel"
   }
 }

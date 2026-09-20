@@ -3,6 +3,8 @@ import type {
   AgentBuilderRuntimeSwitch,
   AgentBuilderSession,
   AgentBuilderSessionSummary,
+  AgentExportFile,
+  AgentImportReport,
   Attachment,
   AutopilotRun,
   BillingBalance,
@@ -3370,4 +3372,133 @@ export const EMPTY_JOIN_SHARE_LINK_RESPONSE: {
   },
   workspace_id: "",
   workspace_slug: "",
+};
+
+// ---------------------------------------------------------------------------
+// Workspace-wide agent configuration export / import
+// (`GET /api/agents/export`, `POST /api/agents/import`)
+//
+// The wire format matches the CLI's `multica agent export` file. Payloads are
+// validated here because imported files can be hand-edited or produced by a
+// different server version — lenient parsing keeps a rename-able subset usable
+// instead of hard-failing on an unknown field.
+// ---------------------------------------------------------------------------
+
+const AgentExportSourceMetaSchema = z
+  .object({
+    name: z.string().default(""),
+    url: z.string().optional().default(""),
+    version: z.string().optional().default(""),
+  })
+  .loose();
+
+const AgentExportRuntimeSchema = z
+  .object({
+    source_id: z.string().default(""),
+    name: z.string().default(""),
+    provider: z.string().default(""),
+  })
+  .loose();
+
+const AgentExportSkillFileSchema = z
+  .object({
+    path: z.string().default(""),
+    content: z.string().default(""),
+  })
+  .loose();
+
+const AgentExportSkillSchema = z
+  .object({
+    source_id: z.string().default(""),
+    name: z.string().default(""),
+    description: z.string().default(""),
+    content: z.string().default(""),
+    config: z.unknown().default(null),
+    files: z.array(AgentExportSkillFileSchema).default([]),
+  })
+  .loose();
+
+const AgentExportEntrySchema = z
+  .object({
+    source_id: z.string().default(""),
+    name: z.string().default(""),
+    archived: z.boolean().default(false),
+    runtime_source_id: z.string().default(""),
+    runtime_name: z.string().default(""),
+    runtime_provider: z.string().default(""),
+    description: z.string().default(""),
+    instructions: z.string().default(""),
+    conversation_starters: z
+      .array(
+        z
+          .object({
+            label: z.string().default(""),
+            prompt: z.string().default(""),
+          })
+          .loose(),
+      )
+      .default([]),
+    model: z.string().default(""),
+    thinking_level: z.string().default(""),
+    service_tier: z.string().default(""),
+    custom_args: z.unknown().default(null),
+    max_concurrent_tasks: z.number().int().default(6),
+    permission_mode: z.enum(["private", "public_to"]).default("private"),
+    custom_env: z.record(z.string(), z.string()).default({}),
+    mcp_config: z.unknown().default(null),
+    skill_names: z.array(z.string()).default([]),
+    notes: z.array(z.string()).default([]),
+  })
+  .loose();
+
+export const AgentExportFileSchema = z
+  .object({
+    version: z.number().default(0),
+    kind: z.string().default(""),
+    exported_at: z.string().default(""),
+    source: AgentExportSourceMetaSchema.default({
+      name: "",
+      url: "",
+      version: "",
+    }),
+    runtimes: z.array(AgentExportRuntimeSchema).default([]),
+    skills: z.array(AgentExportSkillSchema).default([]),
+    agents: z.array(AgentExportEntrySchema).default([]),
+  })
+  .loose();
+
+export const EMPTY_AGENT_EXPORT_FILE: AgentExportFile = {
+  version: 0,
+  kind: "",
+  exported_at: "",
+  source: { name: "" },
+  runtimes: [],
+  skills: [],
+  agents: [],
+};
+
+const AgentImportResultSchema = z
+  .object({
+    name: z.string().default(""),
+    status: z
+      .enum(["created", "renamed", "skipped", "failed"])
+      .default("failed"),
+    id: z.string().default(""),
+    source_id: z.string().default(""),
+    runtime: z.string().default(""),
+    notes: z.array(z.string()).default([]),
+    error: z.string().default(""),
+  })
+  .loose();
+
+export const AgentImportReportSchema = z
+  .object({
+    error: z.string().optional().default(""),
+    results: z.array(AgentImportResultSchema).default([]),
+  })
+  .loose();
+
+export const EMPTY_AGENT_IMPORT_REPORT: AgentImportReport = {
+  error: "",
+  results: [],
 };

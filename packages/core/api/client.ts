@@ -30,6 +30,9 @@ import type {
   UpdateAgentRequest,
   AgentEnvResponse,
   UpdateAgentEnvRequest,
+  AgentExportFile,
+  AgentImportConflictMode,
+  AgentImportReport,
   AgentTask,
   AgentActivityBucket,
   AgentRunCount,
@@ -309,6 +312,10 @@ import {
   CreateIssueResponseSchema,
   IssueSchema,
   AgentTaskSchema,
+  AgentExportFileSchema,
+  EMPTY_AGENT_EXPORT_FILE,
+  AgentImportReportSchema,
+  EMPTY_AGENT_IMPORT_REPORT,
   SourceContextPreviewSchema,
   CommentSubIssueTaskResponseSchema,
   ListWebhookDeliveriesResponseSchema,
@@ -1620,6 +1627,60 @@ export class ApiClient {
 
   async restoreAgent(id: string): Promise<Agent> {
     return this.fetch(`/api/agents/${id}/restore`, { method: "POST" });
+  }
+
+  /**
+   * Workspace-wide agent configuration export (`GET /api/agents/export`).
+   * Owner/admin only. Returns a full multica-agent-export file (agents +
+   * skills + runtimes, with plaintext custom_env/mcp_config); caller decides
+   * how to persist it (the CLI and the web UI both serialize it to JSON).
+   */
+  async exportAgents(params?: {
+    workspace_id?: string;
+    include_archived?: boolean;
+  }): Promise<AgentExportFile> {
+    const search = new URLSearchParams();
+    if (params?.workspace_id) search.set("workspace_id", params.workspace_id);
+    if (params?.include_archived) search.set("include_archived", "true");
+    const qs = search.toString() !== "" ? `?${search.toString()}` : "";
+    const raw = await this.fetch<unknown>(`/api/agents/export${qs}`);
+    return parseWithFallback(
+      raw,
+      AgentExportFileSchema,
+      EMPTY_AGENT_EXPORT_FILE,
+      { endpoint: "GET /api/agents/export" },
+    );
+  }
+
+  /**
+   * Workspace-wide agent configuration import (`POST /api/agents/import`).
+   * Owner/admin only. Accepts a multica-agent-export file (from the web UI or
+   * `multica agent export`); `onConflict` controls what happens when an agent
+   * name already exists (fail / skip / rename). Returns a per-agent report.
+   */
+  async importAgents(
+    file: AgentExportFile,
+    opts?: {
+      workspace_id?: string;
+      onConflict?: AgentImportConflictMode;
+      defaultRuntimeId?: string;
+    },
+  ): Promise<AgentImportReport> {
+    const search = new URLSearchParams();
+    if (opts?.workspace_id) search.set("workspace_id", opts.workspace_id);
+    if (opts?.onConflict) search.set("on_conflict", opts.onConflict);
+    if (opts?.defaultRuntimeId) search.set("default_runtime_id", opts.defaultRuntimeId);
+    const qs = search.toString() !== "" ? `?${search.toString()}` : "";
+    const raw = await this.fetch<unknown>(`/api/agents/import${qs}`, {
+      method: "POST",
+      body: JSON.stringify(file),
+    });
+    return parseWithFallback(
+      raw,
+      AgentImportReportSchema,
+      EMPTY_AGENT_IMPORT_REPORT,
+      { endpoint: "POST /api/agents/import" },
+    );
   }
 
   // Bulk-cancel every active task (queued/dispatched/running) for the agent.

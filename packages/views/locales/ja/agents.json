@@ -973,5 +973,33 @@
   "actions": {
     "selected_other": "{{count}} 件選択中",
     "clear_selection": "選択を解除"
+  },
+  "export_import": {
+    "menu": "インポート / エクスポート",
+    "export_action": "エージェントをエクスポート",
+    "export_downloading": "エクスポート中…",
+    "export_error": "エクスポートに失敗しました：{{message}}",
+    "import_action": "エージェントをインポート",
+    "import_dialog_title": "エージェントをインポート",
+    "import_dialog_description": "multica-agent-export JSON ファイルを選択して、エージェントをこのワークスペースに復元します。カスタム環境変数と MCP 設定を含むエージェント構成はそのまま復元されます。",
+    "import_file_label": "エクスポートファイル",
+    "import_file_empty": "ファイルが選択されていません",
+    "import_invalid_file": "multica のエージェントエクスポートファイルではないようです。",
+    "import_conflict_label": "エージェント名が既に存在する場合",
+    "import_conflict_skip": "スキップ",
+    "import_conflict_fail": "停止して報告",
+    "import_conflict_rename": "「（imported）」を付けて作成",
+    "import_runtime_label": "デフォルトのランタイム（任意）",
+    "import_runtime_placeholder": "各エージェントのランタイムを使用",
+    "import_submit": "エージェントを {{count}} 件インポート",
+    "import_submitting": "インポート中…",
+    "import_report_title": "インポート結果",
+    "import_report_done": "完了",
+    "import_status_created": "作成済み",
+    "import_status_renamed": "名前変更済み",
+    "import_status_skipped": "スキップ済み",
+    "import_status_failed": "失敗",
+    "import_error": "インポートに失敗しました：{{message}}",
+    "import_cancel": "キャンセル"
   }
 }

@@ -826,6 +826,96 @@ export interface UpdateAgentEnvRequest {
   custom_env: Record<string, string>;
 }
 
+// ---------------------------------------------------------------------------
+// Workspace-wide agent configuration export / import
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire shapes for the workspace-level agent export (`GET /api/agents/export`)
+ * and import (`POST /api/agents/import`) endpoints. The JSON is deliberately
+ * identical to the CLI's `multica agent export` file so a file exported from
+ * the web UI can be re-imported with the CLI and vice-versa. Secrets travel in
+ * plaintext in these payloads (custom_env / mcp_config); both endpoints are
+ * workspace owner/admin only.
+ */
+
+export interface AgentExportSourceMeta {
+  name: string;
+  url?: string;
+  version?: string;
+}
+
+export interface AgentExportRuntime {
+  source_id: string;
+  name: string;
+  provider: string;
+}
+
+export interface AgentExportSkillFile {
+  path: string;
+  content: string;
+}
+
+export interface AgentExportSkill {
+  source_id: string;
+  name: string;
+  description: string;
+  content: string;
+  config?: unknown;
+  files?: AgentExportSkillFile[];
+}
+
+export interface AgentExportEntry {
+  source_id: string;
+  name: string;
+  archived?: boolean;
+  runtime_source_id?: string;
+  runtime_name?: string;
+  runtime_provider?: string;
+  description?: string;
+  instructions?: string;
+  conversation_starters?: AgentConversationStarter[];
+  model?: string;
+  thinking_level?: string;
+  service_tier?: string;
+  custom_args?: unknown;
+  max_concurrent_tasks?: number;
+  permission_mode?: AgentPermissionMode;
+  custom_env?: Record<string, string>;
+  mcp_config?: unknown;
+  skill_names?: string[];
+  notes?: string[];
+}
+
+export interface AgentExportFile {
+  version: number;
+  kind: string;
+  exported_at: string;
+  source: AgentExportSourceMeta;
+  runtimes?: AgentExportRuntime[];
+  skills?: AgentExportSkill[];
+  agents: AgentExportEntry[];
+}
+
+export type AgentImportConflictMode = "fail" | "skip" | "rename";
+
+export type AgentImportStatus = "created" | "renamed" | "skipped" | "failed";
+
+export interface AgentImportResult {
+  name: string;
+  status: AgentImportStatus;
+  id?: string;
+  source_id?: string;
+  runtime?: string;
+  notes?: string[];
+  error?: string;
+}
+
+export interface AgentImportReport {
+  error?: string;
+  results: AgentImportResult[];
+}
+
 // Skills
 
 /**
