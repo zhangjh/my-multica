@@ -22,9 +22,12 @@ const installationsRef = vi.hoisted(() => ({
 }));
 const mockRegister = vi.hoisted(() => vi.fn());
 const mockDeleteInstallation = vi.hoisted(() => vi.fn());
+const mockUpdateSettings = vi.hoisted(() => vi.fn());
+const mockClearSettings = vi.hoisted(() => vi.fn());
 const mockOpenExternal = vi.hoisted(() => vi.fn());
 const mockInvalidate = vi.hoisted(() => vi.fn());
 const mockToastError = vi.hoisted(() => vi.fn());
+const mockToastSuccess = vi.hoisted(() => vi.fn());
 const telegramQueryErrorRef = vi.hoisted(() => ({ current: false }));
 const telegramQueryLoadingRef = vi.hoisted(() => ({ current: false }));
 
@@ -74,13 +77,18 @@ vi.mock("@multica/core/telegram", () => ({
     queryKey: ["telegram", "installations"],
     queryFn: vi.fn(),
   }),
-  telegramKeys: { installations: (wsId: string) => ["telegram", "installations", wsId] },
+  telegramKeys: {
+    installations: (wsId: string) => ["telegram", "installations", wsId],
+    settings: (wsId: string) => ["telegram", "settings", wsId],
+  },
 }));
 
 vi.mock("@multica/core/api", () => ({
   api: {
     registerTelegramBot: mockRegister,
     deleteTelegramInstallation: mockDeleteInstallation,
+    updateTelegramSettings: mockUpdateSettings,
+    clearTelegramSettings: mockClearSettings,
   },
 }));
 
@@ -94,7 +102,7 @@ vi.mock("@multica/core/auth", () => {
 });
 
 vi.mock("sonner", () => ({
-  toast: { success: vi.fn(), error: mockToastError, message: vi.fn() },
+  toast: { success: mockToastSuccess, error: mockToastError, message: vi.fn() },
 }));
 
 vi.mock("../../platform", () => ({ openExternal: mockOpenExternal }));
@@ -251,10 +259,19 @@ describe("TelegramTab", () => {
     expect(screen.queryByText(/Telegram integration not enabled/i)).toBeNull();
   });
 
-  it("surfaces the not-enabled notice when the deployment has no Telegram key", () => {
+  it("shows the enable form to an admin when the deployment has no Telegram key", () => {
+    installationsRef.current = { installations: [], configured: false, install_supported: false };
+    renderUI(<TelegramTab />);
+    expect(screen.getByTestId("telegram-master-key")).toBeTruthy();
+    expect(screen.getByTestId("telegram-master-key-save")).toBeTruthy();
+  });
+
+  it("surfaces the admin-only notice to non-managers when there is no Telegram key", () => {
+    membersRef.current = [{ user_id: "user-1", role: "member" }];
     installationsRef.current = { installations: [], configured: false, install_supported: false };
     renderUI(<TelegramTab />);
     expect(screen.getByText(/Telegram integration not enabled/i)).toBeTruthy();
+    expect(screen.queryByTestId("telegram-master-key")).toBeNull();
   });
 
   it("shows the empty state when configured but nothing is connected", () => {
@@ -273,7 +290,50 @@ describe("TelegramTab", () => {
     renderUI(<TelegramTab />);
     expect(screen.getByText("Agent agent-7")).toBeTruthy();
     expect(screen.getByText("@my_bot")).toBeTruthy();
-    expect(screen.getByText(/Disconnect/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^Disconnect$/i })).toBeTruthy();
+  });
+
+  it("shows the disable card to an admin when configured", () => {
+    installationsRef.current = {
+      installations: [
+        { id: "i1", agent_id: "agent-7", status: "active", bot_username: "my_bot" },
+      ],
+      configured: true,
+      install_supported: true,
+    };
+    renderUI(<TelegramTab />);
+    expect(screen.getByText(/Disable Telegram/i)).toBeTruthy();
+    expect(screen.getByTestId("telegram-disable")).toBeTruthy();
+  });
+
+  it("enables Telegram with a saved master key and refreshes the lists", async () => {
+    mockUpdateSettings.mockResolvedValue({ configured: true });
+    installationsRef.current = { installations: [], configured: false, install_supported: false };
+    renderUI(<TelegramTab />);
+    await userEvent.type(screen.getByTestId("telegram-master-key"), "bXl0ZXN0a2V5");
+    await userEvent.click(screen.getByTestId("telegram-master-key-save"));
+    await waitFor(() =>
+      expect(mockUpdateSettings).toHaveBeenCalledWith("workspace-1", { secret_key: "bXl0ZXN0a2V5" }),
+    );
+    expect(mockInvalidate).toHaveBeenCalled();
+    expect(mockToastSuccess).toHaveBeenCalledWith("Telegram enabled");
+  });
+
+  it("disables Telegram after confirmation and refreshes", async () => {
+    mockClearSettings.mockResolvedValue(undefined);
+    installationsRef.current = {
+      installations: [
+        { id: "i1", agent_id: "agent-7", status: "active", bot_username: "my_bot" },
+      ],
+      configured: true,
+      install_supported: true,
+    };
+    renderUI(<TelegramTab />);
+    await userEvent.click(screen.getByTestId("telegram-disable"));
+    await userEvent.click(await screen.findByRole("button", { name: /^Disable$/i }));
+    await waitFor(() => expect(mockClearSettings).toHaveBeenCalledWith("workspace-1"));
+    expect(mockInvalidate).toHaveBeenCalled();
+    expect(mockToastSuccess).toHaveBeenCalledWith("Telegram disabled");
   });
 
   it("disconnects only after confirmation and refreshes the installation list", async () => {
