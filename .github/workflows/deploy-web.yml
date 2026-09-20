@@ -1,0 +1,69 @@
+name: Deploy web to Cloudflare Workers
+
+# Builds apps/web with @opennextjs/cloudflare and deploys it as the
+# `multica-web` Worker (wrangler deploy), then the site is served from the
+# `tx-multica.zhangjh.cn` custom domain on that Worker.
+#
+# This is the OpenNext-supported target. Cloudflare Pages is NOT used for the
+# web app: Pages uploads the build output directory as static assets, which
+# would reject the ~27 MiB OpenNext server bundle (handler.mjs) on Pages'
+# 25 MiB per-file limit. Workers allow bundles up to 64 MiB uncompressed.
+#
+# The Worker runs the Next.js app for the web UI only. The browser talks to
+# the backend API/WS directly at https://api.tx-multica.zhangjh.cn (a grey
+# DNS-only record -> VPS nginx -> 127.0.0.1:8080, with a Let's Encrypt cert).
+# NEXT_PUBLIC_API_URL is a NEXT_PUBLIC_* var: Next inlines it at build time,
+# so it is set below on the Build step and is deliberately absent from
+# wrangler.toml [vars].
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/web/**
+      - packages/core/**
+      - packages/ui/**
+      - packages/views/**
+      - packages/tsconfig/**
+      - packages/eslint-config/**
+      - pnpm-lock.yaml
+      - package.json
+      - pnpm-workspace.yaml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (.open-next)
+        working-directory: apps/web
+        run: pnpm run build:pages
+        env:
+          NEXT_PUBLIC_API_URL: https://api.tx-multica.zhangjh.cn
+          DEPLOY_TARGET: cloudflare
+
+      - name: Deploy (wrangler)
+        working-directory: apps/web
+        run: pnpm exec opennextjs-cloudflare deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
