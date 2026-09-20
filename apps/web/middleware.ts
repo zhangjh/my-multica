@@ -42,11 +42,14 @@ function nextWithLocale(req: NextRequest): NextResponse {
   return NextResponse.next({ request: { headers } });
 }
 
-// Next.js 16 renamed `middleware` → `proxy`. API surface (NextRequest /
-// NextResponse / cookies / matcher) is identical; the only behavioral
-// change is the runtime — proxy is forced to nodejs and cannot opt into
-// edge.
-export function proxy(req: NextRequest) {
+// Kept as the classic `middleware.ts` (edge runtime) instead of Next 16's
+// `proxy.ts` (nodejs runtime) so the Cloudflare Workers deployment
+// (@opennextjs/cloudflare) can run it: the adapter only supports edge
+// middleware and errors on node runtime proxies (opennextjs/opennextjs-
+// cloudflare#1082). Behavior is identical — the runtime mapping of
+// /api,/ws,/auth,/uploads,/health upstreams is resolved from process.env at
+// request time either way.
+export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
   const runtimeDestination = runtimeRewriteDestination(pathname, process.env);
   if (runtimeDestination) {

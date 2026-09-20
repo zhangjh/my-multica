@@ -47,6 +47,10 @@ ENV NEXT_PUBLIC_APP_VERSION=$NEXT_PUBLIC_APP_VERSION
 ENV STANDALONE=true
 
 # Build the web app (standalone output for minimal runtime)
+# Bound the build-time heap: a full monorepo Next build otherwise spikes
+# far above what a small self-host box (4GB-ish with several other
+# containers) can absorb without the host OOM-killing services.
+ENV NODE_OPTIONS=--max-old-space-size=1024
 RUN pnpm --filter @multica/web build
 
 # --- Runtime ---

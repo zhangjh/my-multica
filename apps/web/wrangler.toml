@@ -1,0 +1,25 @@
+name = "multica-web"
+main = ".open-next/worker.js"
+compatibility_date = "2026-03-01"
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
+
+[assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
+
+# The Worker runs the Next.js app for the web UI only. The browser talks to
+# the backend API/WS directly at https://api.tx-multica.zhangjh.cn (a grey
+# DNS-only record -> VPS nginx -> 127.0.0.1:8080, with a Let's Encrypt cert),
+# so REMOTE_API_URL is deliberately left unset here — server-side reverse-
+# proxying of /api,/ws,/auth,/uploads from the Worker is not used in this
+# topology. NEXT_PUBLIC_API_URL instead IS a NEXT_PUBLIC_* var and must be
+# baked at BUILD time (Next inlines it), so it is passed as an env var to
+# `opennextjs-cloudflare build`, not declared here.
+
+[vars]
+
+# services self-binding for the OpenNext Worker (see @opennextjs/cloudflare
+# get-started). Kept matching `name` above.
+[[services]]
+binding = "WORKER_SELF_REFERENCE"
+service = "multica-web"

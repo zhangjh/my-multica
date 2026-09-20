@@ -47,6 +47,13 @@ const nextConfig: NextConfig = {
   images: {
     formats: ["image/avif", "image/webp"],
     qualities: [75, 80, 85],
+    // Cloudflare Workers (@opennextjs/cloudflare) has no sharp-based image
+    // optimizer; `unoptimized` keeps /_next/image serving the original bytes
+    // and drops the IMAGES binding requirement. Only applied for the
+    // Cloudflare build target so the self-host Node image keeps resizing.
+    ...(process.env.DEPLOY_TARGET === "cloudflare"
+      ? { unoptimized: true }
+      : {}),
   },
   async rewrites() {
     return {
