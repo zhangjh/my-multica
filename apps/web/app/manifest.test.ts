@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
-import { proxy } from "../proxy";
+import { middleware } from "../middleware";
 import manifest, { PWA_START_URL } from "./manifest";
 
 function launch(cookies: Record<string, string>, host = "www.multica.ai") {
@@ -8,7 +8,7 @@ function launch(cookies: Record<string, string>, host = "www.multica.ai") {
     .map(([key, value]) => `${key}=${value}`)
     .join("; ");
 
-  return proxy(
+  return middleware(
     new NextRequest(`https://${host}${PWA_START_URL}`, {
       headers: cookieHeader ? { cookie: cookieHeader } : undefined,
     }),
@@ -54,7 +54,7 @@ describe("web app manifest", () => {
     expect(shortcuts.length).toBeGreaterThan(0);
     for (const shortcut of shortcuts) {
       const resolve = (cookie: string) =>
-        proxy(
+        middleware(
           new NextRequest(`https://www.multica.ai${shortcut.url}`, {
             headers: { cookie },
           }),

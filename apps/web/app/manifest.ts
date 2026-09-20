@@ -6,9 +6,9 @@ import type { MetadataRoute } from "next";
  *
  * `start_url` is deliberately NOT "/". The official marketing hosts keep the
  * root path on the public site even for a signed-in session (see
- * `isOfficialMarketingHost` in proxy.ts), so an installed app pointed at "/"
+ * `isOfficialMarketingHost` in middleware.ts), so an installed app pointed at "/"
  * would open the landing page. "/inbox" is one of `LEGACY_ROUTE_SEGMENTS`,
- * which proxy.ts resolves per session: signed in with a known workspace it
+ * which middleware.ts resolves per session: signed in with a known workspace it
  * lands on that workspace's inbox, signed in without one it lands on /login
  * (which resolves against the workspace list), and signed out it lands on
  * /login too. All three are pinned in manifest.test.ts, because a launcher
@@ -27,7 +27,7 @@ import type { MetadataRoute } from "next";
  * full-bleed because Android crops it to the launcher's shape.
  */
 
-/** Launch path. Exported so manifest.test.ts can run it through the proxy. */
+/** Launch path. Exported so manifest.test.ts can run it through the middleware. */
 export const PWA_START_URL = "/inbox";
 
 export default function manifest(): MetadataRoute.Manifest {
