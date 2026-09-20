@@ -307,15 +307,6 @@ _published_backend_port() {
   printf '8080'
 }
 
-_published_frontend_port() {
-  local value
-  if value="$(_resolve FRONTEND_PORT)" && [ -n "$value" ]; then
-    printf '%s' "$value"
-    return
-  fi
-  printf '3000'
-}
-
 case "${1:-}" in
   info) exit 0 ;;
   compose)
@@ -331,12 +322,11 @@ case "${1:-}" in
         service=""
         for arg in "$@"; do
           case "$arg" in
-            backend | frontend) service="$arg"; break ;;
+            backend) service="$arg"; break ;;
           esac
         done
         case "$service" in
           backend) printf '127.0.0.1:%s\n' "$(_published_backend_port)" ;;
-          frontend) printf '127.0.0.1:%s\n' "$(_published_frontend_port)" ;;
           *) exit 1 ;;
         esac
         ;;
@@ -404,20 +394,18 @@ _run_with_server() {
 
 # Asserts the probed port and the printed ports all match the stub's answer.
 _require_server_ports() {
-  local tmp="$1" label="$2" expected_backend="$3" expected_frontend="$4"
-  local probed printed_backend printed_frontend
+  local tmp="$1" label="$2" expected_backend="$3"
+  local probed printed_backend
 
   probed="$(sed -n '1s#.*localhost:\([0-9]*\)/health#\1#p' "$tmp/curl.log")"
   printed_backend="$(sed -n 's#.*Backend:[^0-9]*http://localhost:\([0-9]*\).*#\1#p' "$tmp/install.out" | head -n 1)"
-  printed_frontend="$(sed -n 's#.*Frontend:[^0-9]*http://localhost:\([0-9]*\).*#\1#p' "$tmp/install.out" | head -n 1)"
 
   if [ "$probed" != "$expected_backend" ] ||
-    [ "$printed_backend" != "$expected_backend" ] ||
-    [ "$printed_frontend" != "$expected_frontend" ]; then
+    [ "$printed_backend" != "$expected_backend" ]; then
     echo "[$label] installer ports disagree with the port Compose published" >&2
-    echo "  compose published:  backend=$expected_backend frontend=$expected_frontend" >&2
+    echo "  compose published:  backend=$expected_backend" >&2
     echo "  health check probed: ${probed:-<none>}" >&2
-    echo "  printed:            backend=${printed_backend:-<none>} frontend=${printed_frontend:-<none>}" >&2
+    echo "  printed:            backend=${printed_backend:-<none>}" >&2
     cat "$tmp/install.out" >&2 || true
     return 1
   fi
@@ -428,23 +416,21 @@ test_with_server_uses_compose_published_ports() {
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' RETURN
 
-  # label | .env mutation (sed) | ambient env | expected backend | expected frontend
-  local cases='defaults|||8080|3000
-env-file PORT|s/^PORT=8080/PORT=9100/||9100|3000
-env-file BACKEND_PORT|s/^# BACKEND_PORT=8080/BACKEND_PORT=9200/||9200|3000
-env-file API_PORT|s/^# API_PORT=8080/API_PORT=9300/||9300|3000
-env-file SERVER_PORT|s/^# SERVER_PORT=8080/SERVER_PORT=9400/||9400|3000
-env-file FRONTEND_PORT|s/^FRONTEND_PORT=3000/FRONTEND_PORT=3100/||8080|3100
-ambient PORT beats .env|s/^PORT=8080/PORT=9100/|PORT=9500|9500|3000
-ambient BACKEND_PORT beats .env|s/^PORT=8080/PORT=9100/|BACKEND_PORT=9600|9600|3000
-ambient API_PORT beats .env|s/^PORT=8080/PORT=9100/|API_PORT=9700|9700|3000
-ambient SERVER_PORT beats .env|s/^PORT=8080/PORT=9100/|SERVER_PORT=9800|9800|3000
-ambient FRONTEND_PORT beats .env|s/^FRONTEND_PORT=3000/FRONTEND_PORT=3100/|FRONTEND_PORT=3200|8080|3200
-empty ambient BACKEND_PORT falls through|s/^PORT=8080/PORT=9100/|BACKEND_PORT=|9100|3000
-empty env-file BACKEND_PORT falls through|s/^PORT=8080/PORT=9100/;s/^# BACKEND_PORT=8080/BACKEND_PORT=/||9100|3000'
+  # label | .env mutation (sed) | ambient env | expected backend
+  local cases='defaults|||8080
+env-file PORT|s/^PORT=8080/PORT=9100/||9100
+env-file BACKEND_PORT|s/^# BACKEND_PORT=8080/BACKEND_PORT=9200/||9200
+env-file API_PORT|s/^# API_PORT=8080/API_PORT=9300/||9300
+env-file SERVER_PORT|s/^# SERVER_PORT=8080/SERVER_PORT=9400/||9400
+ambient PORT beats .env|s/^PORT=8080/PORT=9100/|PORT=9500|9500
+ambient BACKEND_PORT beats .env|s/^PORT=8080/PORT=9100/|BACKEND_PORT=9600|9600
+ambient API_PORT beats .env|s/^PORT=8080/PORT=9100/|API_PORT=9700|9700
+ambient SERVER_PORT beats .env|s/^PORT=8080/PORT=9100/|SERVER_PORT=9800|9800
+empty ambient BACKEND_PORT falls through|s/^PORT=8080/PORT=9100/|BACKEND_PORT=|9100
+empty env-file BACKEND_PORT falls through|s/^PORT=8080/PORT=9100/;s/^# BACKEND_PORT=8080/BACKEND_PORT=/||9100'
 
-  local label mutation ambient expect_backend expect_frontend
-  while IFS='|' read -r label mutation ambient expect_backend expect_frontend; do
+  local label mutation ambient expect_backend
+  while IFS='|' read -r label mutation ambient expect_backend; do
     [ -n "$label" ] || continue
 
     rm -rf "$tmp/server" "$tmp/stub-bin"
@@ -460,7 +446,7 @@ empty env-file BACKEND_PORT falls through|s/^PORT=8080/PORT=9100/;s/^# BACKEND_P
     else
       _run_with_server "$tmp" || return 1
     fi
-    _require_server_ports "$tmp" "$label" "$expect_backend" "$expect_frontend" || return 1
+    _require_server_ports "$tmp" "$label" "$expect_backend" || return 1
   done <<<"$cases"
 }
 

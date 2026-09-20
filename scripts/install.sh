@@ -19,10 +19,10 @@ REPO_WEB_URL="https://github.com/multica-ai/multica"  # without .git, for GitHub
 INSTALL_DIR="${MULTICA_INSTALL_DIR:-$HOME/.multica/server}"
 BREW_PACKAGE="multica-ai/tap/multica"
 
-# Host ports Compose reported after `up -d`; set by setup_server and reused by
-# the summary so the health check and the printed URLs cannot diverge.
+# Host port Compose reported after `up -d`; set by setup_server and reused by
+# the summary so the health check and the printed URL cannot diverge.
+# (The web frontend is deployed to Cloudflare, not part of the self-host stack.)
 SELFHOST_BACKEND_PORT=""
-SELFHOST_FRONTEND_PORT=""
 
 # Colors (disabled when not a terminal)
 if [ -t 1 ] || [ -t 2 ]; then
@@ -394,10 +394,6 @@ setup_server() {
     fail "Started the stack but could not read the backend host port from Docker Compose.
   Check it with: cd $INSTALL_DIR && docker compose -f docker-compose.selfhost.yml ps"
   fi
-  if ! SELFHOST_FRONTEND_PORT="$(compose_published_port frontend 3000)"; then
-    fail "Started the stack but could not read the frontend host port from Docker Compose.
-  Check it with: cd $INSTALL_DIR && docker compose -f docker-compose.selfhost.yml ps"
-  fi
 
   # Wait for health check
   info "Waiting for backend to be ready..."
@@ -466,7 +462,6 @@ run_with_server() {
   printf "${BOLD}${GREEN}  ✓ Multica server is running and CLI is ready!${RESET}\n"
   printf "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
   printf "\n"
-  printf "  ${BOLD}Frontend:${RESET}  http://localhost:%s\n" "$SELFHOST_FRONTEND_PORT"
   printf "  ${BOLD}Backend:${RESET}   http://localhost:%s\n" "$SELFHOST_BACKEND_PORT"
   printf "  ${BOLD}Server at:${RESET} %s\n" "$INSTALL_DIR"
   printf "\n"

@@ -2,11 +2,11 @@
 # Port-contract tests for scripts/install.ps1 — the PowerShell counterpart of the
 # `--with-server` cases in scripts/install.test.sh.
 #
-# The installer used to derive the backend/frontend host port from .env with its
-# own copy of the alias chain. Docker Compose gives the calling process
+# The installer used to derive the backend host port from .env with its own
+# copy of the alias chain. Docker Compose gives the calling process
 # environment precedence over .env, so any ambient PORT / BACKEND_PORT /
-# API_PORT / SERVER_PORT / FRONTEND_PORT moved the published port while the
-# installer kept probing and printing the file value (#6145).
+# API_PORT / SERVER_PORT moved the published port while the installer kept
+# probing and printing the file value (#6145).
 #
 # Here the docker stub plays Compose: it answers `port` from the same resolution
 # Compose performs — environment first, then .env. The installer must take that
@@ -63,7 +63,6 @@ foreach ($banned in @("Get-SelfHostBackendPort", "Get-SelfHostFrontendPort", "Ge
 }
 foreach ($required in @(
         'Get-ComposePublishedPort -Service "backend" -ContainerPort 8080',
-        'Get-ComposePublishedPort -Service "frontend" -ContainerPort 3000',
         'http://localhost:$($script:SelfHostBackendPort)/health')) {
     if ($installerSource -notmatch [regex]::Escape($required)) {
         Fail-Test "install.ps1 is missing the Compose-published-port wiring: $required"
@@ -115,22 +114,20 @@ if ($null -ne $failureResult) {
 # 3. End to end: the probed URL and the printed URLs are the published ports
 # ---------------------------------------------------------------------------
 $cases = @(
-    @{ Label = "defaults"; Env = @{}; Mutation = $null; Backend = "8080"; Frontend = "3000" }
-    @{ Label = "env-file PORT"; Env = @{}; Mutation = @{ PORT = "9100" }; Backend = "9100"; Frontend = "3000" }
-    @{ Label = "env-file BACKEND_PORT"; Env = @{}; Mutation = @{ BACKEND_PORT = "9200" }; Backend = "9200"; Frontend = "3000" }
-    @{ Label = "env-file API_PORT"; Env = @{}; Mutation = @{ API_PORT = "9300" }; Backend = "9300"; Frontend = "3000" }
-    @{ Label = "env-file SERVER_PORT"; Env = @{}; Mutation = @{ SERVER_PORT = "9400" }; Backend = "9400"; Frontend = "3000" }
-    @{ Label = "env-file FRONTEND_PORT"; Env = @{}; Mutation = @{ FRONTEND_PORT = "3100" }; Backend = "8080"; Frontend = "3100" }
-    @{ Label = "ambient PORT beats .env"; Env = @{ PORT = "9500" }; Mutation = @{ PORT = "9100" }; Backend = "9500"; Frontend = "3000" }
-    @{ Label = "ambient BACKEND_PORT beats .env"; Env = @{ BACKEND_PORT = "9600" }; Mutation = @{ PORT = "9100" }; Backend = "9600"; Frontend = "3000" }
-    @{ Label = "ambient API_PORT beats .env"; Env = @{ API_PORT = "9700" }; Mutation = @{ PORT = "9100" }; Backend = "9700"; Frontend = "3000" }
-    @{ Label = "ambient SERVER_PORT beats .env"; Env = @{ SERVER_PORT = "9800" }; Mutation = @{ PORT = "9100" }; Backend = "9800"; Frontend = "3000" }
-    @{ Label = "ambient FRONTEND_PORT beats .env"; Env = @{ FRONTEND_PORT = "3200" }; Mutation = @{ FRONTEND_PORT = "3100" }; Backend = "8080"; Frontend = "3200" }
+    @{ Label = "defaults"; Env = @{}; Mutation = $null; Backend = "8080" }
+    @{ Label = "env-file PORT"; Env = @{}; Mutation = @{ PORT = "9100" }; Backend = "9100" }
+    @{ Label = "env-file BACKEND_PORT"; Env = @{}; Mutation = @{ BACKEND_PORT = "9200" }; Backend = "9200" }
+    @{ Label = "env-file API_PORT"; Env = @{}; Mutation = @{ API_PORT = "9300" }; Backend = "9300" }
+    @{ Label = "env-file SERVER_PORT"; Env = @{}; Mutation = @{ SERVER_PORT = "9400" }; Backend = "9400" }
+    @{ Label = "ambient PORT beats .env"; Env = @{ PORT = "9500" }; Mutation = @{ PORT = "9100" }; Backend = "9500" }
+    @{ Label = "ambient BACKEND_PORT beats .env"; Env = @{ BACKEND_PORT = "9600" }; Mutation = @{ PORT = "9100" }; Backend = "9600" }
+    @{ Label = "ambient API_PORT beats .env"; Env = @{ API_PORT = "9700" }; Mutation = @{ PORT = "9100" }; Backend = "9700" }
+    @{ Label = "ambient SERVER_PORT beats .env"; Env = @{ SERVER_PORT = "9800" }; Mutation = @{ PORT = "9100" }; Backend = "9800" }
     # An explicitly empty higher-priority alias contributes no port, so the chain
     # continues. Expressed through .env because whether an *ambient* empty value
     # survives into a child process is platform-dependent; the Bash suite covers
     # the ambient-empty case on POSIX.
-    @{ Label = "env-file empty BACKEND_PORT falls back"; Env = @{}; Mutation = @{ BACKEND_PORT = ""; PORT = "9100" }; Backend = "9100"; Frontend = "3000" }
+    @{ Label = "env-file empty BACKEND_PORT falls back"; Env = @{}; Mutation = @{ BACKEND_PORT = ""; PORT = "9100" }; Backend = "9100" }
 )
 
 $runnerScript = Join-Path ([System.IO.Path]::GetTempPath()) "multica-install-ps1-case.ps1"
@@ -183,12 +180,6 @@ function Get-StubBackendPort {
     return "8080"
 }
 
-function Get-StubFrontendPort {
-    $value = Resolve-ComposeValue -Key "FRONTEND_PORT"
-    if (-not [string]::IsNullOrEmpty($value)) { return $value }
-    return "3000"
-}
-
 # Stand in for the external commands the installer shells out to.
 function docker {
     $global:LASTEXITCODE = 0
@@ -197,7 +188,6 @@ function docker {
     if ($args_.Count -ge 1 -and $args_[0] -eq "compose") {
         if ($args_ -contains "port") {
             if ($args_ -contains "backend") { return "127.0.0.1:$(Get-StubBackendPort)" }
-            if ($args_ -contains "frontend") { return "127.0.0.1:$(Get-StubFrontendPort)" }
             $global:LASTEXITCODE = 1
             return
         }
@@ -235,7 +225,6 @@ foreach ($case in $cases) {
         "# BACKEND_PORT=8080"
         "# API_PORT=8080"
         "# SERVER_PORT=8080"
-        "FRONTEND_PORT=3000"
         "JWT_SECRET=change-me-in-production"
         "POSTGRES_PASSWORD=multica"
     )
@@ -257,7 +246,7 @@ foreach ($case in $cases) {
     # Control the ambient environment explicitly so a CI runner's own PORT
     # cannot leak into the matrix. Absent must mean absent: an empty string is a
     # different input, and the chain treats it as "set but no value".
-    $portVars = @("PORT", "BACKEND_PORT", "API_PORT", "SERVER_PORT", "FRONTEND_PORT")
+    $portVars = @("PORT", "BACKEND_PORT", "API_PORT", "SERVER_PORT")
     $previous = @{}
     foreach ($key in $portVars) {
         $previous[$key] = [System.Environment]::GetEnvironmentVariable($key)
@@ -290,13 +279,12 @@ foreach ($case in $cases) {
     $probed = (Get-Content $probeLog | Select-Object -First 1)
     $probedPort = if ($probed -match "localhost:(\d+)/health") { $Matches[1] } else { $null }
     $printedBackend = if ($rendered -match "Backend:\s+http://localhost:(\d+)") { $Matches[1] } else { $null }
-    $printedFrontend = if ($rendered -match "Frontend:\s+http://localhost:(\d+)") { $Matches[1] } else { $null }
 
-    if ($probedPort -ne $case.Backend -or $printedBackend -ne $case.Backend -or $printedFrontend -ne $case.Frontend) {
+    if ($probedPort -ne $case.Backend -or $printedBackend -ne $case.Backend) {
         Write-Host $rendered
-        Write-Host "  compose published:   backend=$($case.Backend) frontend=$($case.Frontend)"
+        Write-Host "  compose published:   backend=$($case.Backend)"
         Write-Host "  health check probed: $probedPort"
-        Write-Host "  printed:             backend=$printedBackend frontend=$printedFrontend"
+        Write-Host "  printed:             backend=$printedBackend"
         Fail-Test "[$($case.Label)] installer ports disagree with the port Compose published"
     }
 

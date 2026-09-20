@@ -17,10 +17,10 @@ $RepoWebUrl    = "https://github.com/multica-ai/multica"
 $DefaultInstallDir = Join-Path $env:USERPROFILE ".multica\server"
 $InstallDir    = if ($env:MULTICA_INSTALL_DIR) { $env:MULTICA_INSTALL_DIR } else { $DefaultInstallDir }
 
-# Host ports Compose reported after `up -d`; set by Setup-Server and reused by
-# the summary so the health check and the printed URLs cannot diverge.
+# Host port Compose reported after `up -d`; set by Setup-Server and reused by
+# the summary so the health check and the printed URL cannot diverge.
+# (The web frontend is deployed to Cloudflare, not part of the self-host stack.)
 $script:SelfHostBackendPort  = $null
-$script:SelfHostFrontendPort = $null
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -450,10 +450,6 @@ function Install-Server {
     if (-not $script:SelfHostBackendPort) {
         Write-Fail "Started the stack but could not read the backend host port from Docker Compose.`n  Check it with: cd $InstallDir; docker compose -f docker-compose.selfhost.yml ps"
     }
-    $script:SelfHostFrontendPort = Get-ComposePublishedPort -Service "frontend" -ContainerPort 3000
-    if (-not $script:SelfHostFrontendPort) {
-        Write-Fail "Started the stack but could not read the frontend host port from Docker Compose.`n  Check it with: cd $InstallDir; docker compose -f docker-compose.selfhost.yml ps"
-    }
 
     Write-Info "Waiting for backend to be ready..."
     $ready = $false
@@ -521,7 +517,6 @@ function Start-LocalInstall {
     Write-Host "  [OK] Multica server is running and CLI is ready!" -ForegroundColor Green
     Write-Host "  ============================================" -ForegroundColor Green
     Write-Host ""
-    Write-Host "  Frontend:  http://localhost:$($script:SelfHostFrontendPort)"
     Write-Host "  Backend:   http://localhost:$($script:SelfHostBackendPort)"
     Write-Host "  Server at: $InstallDir"
     Write-Host ""

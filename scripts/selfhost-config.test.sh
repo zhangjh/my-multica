@@ -51,7 +51,6 @@ config="$(
     config
 )"
 
-require_config "$config" 'published: "3100"'
 require_config "$config" 'published: "9100"'
 require_config "$config" 'FRONTEND_ORIGIN: http://localhost:3100'
 require_config "$config" 'GOOGLE_REDIRECT_URI: http://localhost:3100/auth/callback'
@@ -224,9 +223,7 @@ let raw = "";
 process.stdin.on("data", (chunk) => (raw += chunk));
 process.stdin.on("end", () => {
   const config = JSON.parse(raw);
-  for (const service of ["backend", "frontend"]) {
-    console.log(service + "=" + config.services[service].ports[0].published);
-  }
+  console.log("backend=" + config.services.backend.ports[0].published);
 });
 ' >>"$STUB_PUBLISHED_RECORD"
   ;;
@@ -344,13 +341,9 @@ require_consistent 'BACKEND_PORT from the environment' 9300
 run_recipe selfhost '' 'PORT=9500' '' >/dev/null
 require_consistent 'PORT from the environment is overridden by .env' 8080
 
-# Defaults stay 8080/3000.
+# Defaults stay 8080.
 run_recipe selfhost '' '' '' >/dev/null
 require_consistent 'defaults' 8080
-if [ "$(published_port frontend)" != "3000" ]; then
-  echo "default frontend host port should be 3000, got $(published_port frontend)"
-  exit 1
-fi
 
 # selfhost-build resolves the port the same way.
 run_recipe selfhost-build 's/^PORT=8080/PORT=9400/' '' '' >/dev/null
@@ -404,12 +397,6 @@ require_consistent 'empty BACKEND_PORT in .env over shell BACKEND_PORT' 8080
 run_recipe selfhost 's/^PORT=8080/PORT=/;s/^# BACKEND_PORT=8080/BACKEND_PORT=/' 'PORT=9000' '' >/dev/null
 require_consistent 'every chain variable emptied in .env' 8080
 
-run_recipe selfhost 's/^FRONTEND_PORT=3000/FRONTEND_PORT=/' 'FRONTEND_PORT=3100' '' >/dev/null
-if [ "$(published_port frontend)" != "3000" ]; then
-  echo "an empty FRONTEND_PORT in .env must fall back to 3000, got $(published_port frontend)"
-  exit 1
-fi
-
 # The recipes must delegate instead of re-deriving the port.
 for expected_call in 'bash scripts/selfhost-wait.sh official' 'bash scripts/selfhost-wait.sh build'; do
   if ! grep -Fq "$expected_call" Makefile; then
@@ -449,16 +436,14 @@ for installer in scripts/install.sh scripts/install.ps1; do
   fi
 done
 for installer_call in \
-  'compose_published_port backend 8080' \
-  'compose_published_port frontend 3000'; do
+  'compose_published_port backend 8080'; do
   if ! grep -Fq "$installer_call" scripts/install.sh; then
     echo "scripts/install.sh must read the published port from Compose: $installer_call"
     exit 1
   fi
 done
 for installer_call in \
-  'Get-ComposePublishedPort -Service "backend" -ContainerPort 8080' \
-  'Get-ComposePublishedPort -Service "frontend" -ContainerPort 3000'; do
+  'Get-ComposePublishedPort -Service "backend" -ContainerPort 8080'; do
   if ! grep -Fq "$installer_call" scripts/install.ps1; then
     echo "scripts/install.ps1 must read the published port from Compose: $installer_call"
     exit 1
@@ -474,14 +459,14 @@ let raw = "";
 process.stdin.on("data", (chunk) => (raw += chunk));
 process.stdin.on("end", () => {
   const config = JSON.parse(raw);
-  console.log(config.services.backend.ports[0].published + " " + config.services.frontend.ports[0].published);
+  console.log(config.services.backend.ports[0].published);
 });
 '
 }
 
-# Each case: label, sed applied to .env.example, ambient env, expected backend,
-# expected frontend. .env.example ships PORT=8080 with every alias commented out.
-while IFS='|' read -r case_label case_mutation case_ambient case_backend case_frontend; do
+# Each case: label, sed applied to .env.example, ambient env, expected backend.
+# .env.example ships PORT=8080 with every alias commented out.
+while IFS='|' read -r case_label case_mutation case_ambient case_backend; do
   [ -n "$case_label" ] || continue
 
   case_env="$tmp_dir/.env.alias"
@@ -492,29 +477,28 @@ while IFS='|' read -r case_label case_mutation case_ambient case_backend case_fr
   fi
 
   # Unset every port variable first so the agent's own environment cannot leak.
-  read -r observed_backend observed_frontend < <(
+  observed_backend="$(
     compose_published_ports "$case_env" \
       -u PORT -u BACKEND_PORT -u API_PORT -u SERVER_PORT -u FRONTEND_PORT \
       ${case_ambient:+"$case_ambient"}
-  )
+  )"
 
-  if [ "$observed_backend" != "$case_backend" ] || [ "$observed_frontend" != "$case_frontend" ]; then
+  if [ "$observed_backend" != "$case_backend" ]; then
     echo "[$case_label] Compose published an unexpected host port"
-    echo "  expected: backend=$case_backend frontend=$case_frontend"
-    echo "  observed: backend=$observed_backend frontend=$observed_frontend"
+    echo "  expected: backend=$case_backend"
+    echo "  observed: backend=$observed_backend"
     exit 1
   fi
 done <<'CASES'
-defaults|||8080|3000
-PORT only|s/^PORT=8080/PORT=9100/||9100|3000
-SERVER_PORT overrides PORT|s/^# SERVER_PORT=8080/SERVER_PORT=9200/||9200|3000
-API_PORT overrides SERVER_PORT|s/^# API_PORT=8080/API_PORT=9300/;s/^# SERVER_PORT=8080/SERVER_PORT=9200/||9300|3000
-BACKEND_PORT overrides all|s/^# BACKEND_PORT=8080/BACKEND_PORT=9400/;s/^# API_PORT=8080/API_PORT=9300/;s/^# SERVER_PORT=8080/SERVER_PORT=9200/||9400|3000
-ambient PORT beats the env file|s/^PORT=8080/PORT=9100/|PORT=9500|9500|3000
-ambient BACKEND_PORT beats the env file|s/^PORT=8080/PORT=9100/|BACKEND_PORT=9600|9600|3000
-ambient API_PORT beats the env file|s/^PORT=8080/PORT=9100/|API_PORT=9700|9700|3000
-ambient SERVER_PORT beats the env file|s/^PORT=8080/PORT=9100/|SERVER_PORT=9800|9800|3000
-ambient FRONTEND_PORT beats the env file|s/^FRONTEND_PORT=3000/FRONTEND_PORT=3100/|FRONTEND_PORT=3200|8080|3200
+defaults|||8080
+PORT only|s/^PORT=8080/PORT=9100/||9100
+SERVER_PORT overrides PORT|s/^# SERVER_PORT=8080/SERVER_PORT=9200/||9200
+API_PORT overrides SERVER_PORT|s/^# API_PORT=8080/API_PORT=9300/;s/^# SERVER_PORT=8080/SERVER_PORT=9200/||9300
+BACKEND_PORT overrides all|s/^# BACKEND_PORT=8080/BACKEND_PORT=9400/;s/^# API_PORT=8080/API_PORT=9300/;s/^# SERVER_PORT=8080/SERVER_PORT=9200/||9400
+ambient PORT beats the env file|s/^PORT=8080/PORT=9100/|PORT=9500|9500
+ambient BACKEND_PORT beats the env file|s/^PORT=8080/PORT=9100/|BACKEND_PORT=9600|9600
+ambient API_PORT beats the env file|s/^PORT=8080/PORT=9100/|API_PORT=9700|9700
+ambient SERVER_PORT beats the env file|s/^PORT=8080/PORT=9100/|SERVER_PORT=9800|9800
 CASES
 
 # An env-file alias beats the same alias from the environment, and the probe
