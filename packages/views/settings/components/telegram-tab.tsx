@@ -227,7 +227,7 @@ function TelegramEnableForm({ wsId }: { wsId: string }) {
             type="password"
             value={secretKey}
             onChange={(e) => setSecretKey(e.target.value)}
-            // Format hint, not copy (base64 key shape).
+            // eslint-disable-next-line no-restricted-syntax -- placeholder is a base64 key format example, not a user-visible string to translate
             placeholder="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
             autoComplete="off"
             spellCheck={false}
