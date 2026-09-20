@@ -1,5 +1,6 @@
-# Development override: build the backend/web images from the current checkout
-# instead of pulling the official GHCR images.
+# Development override: build the backend image from the current checkout
+# instead of pulling the official GHCR image. The web frontend is deployed to
+# Cloudflare (see scripts/deploy-web-cloudflare.sh), not built here.
 
 services:
   backend:
@@ -11,11 +12,3 @@ services:
         VERSION: ${VERSION:-dev}
         COMMIT: ${COMMIT:-unknown}
         DATE: ${DATE:-unknown}
-
-  frontend:
-    image: multica-web:dev
-    build:
-      context: .
-      dockerfile: Dockerfile.web
-      args:
-        NEXT_PUBLIC_APP_VERSION: dev
