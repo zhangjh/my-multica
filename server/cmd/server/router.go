@@ -1123,8 +1123,14 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// Boot enable, in priority order: a key previously stored by an admin via
 	// the settings endpoint, then the MULTICA_TELEGRAM_SECRET_KEY env var.
 	// Enabling merely builds + republishes the Runtime; the Supervisor picks up
-	// active installations on its next sweep regardless.
-	if storedKey, ok := telegramManager.LoadStoredKey(bootCtx); ok {
+	// active installations on its next sweep regardless. The stored-key probe
+	// needs a live pool (nil only in tests), so skip it there.
+	storedOK := false
+	var storedKey []byte
+	if pool != nil {
+		storedKey, storedOK = telegramManager.LoadStoredKey(bootCtx)
+	}
+	if storedOK {
 		if err := telegramManager.EnableKey(bootCtx, storedKey); err != nil {
 			slog.Error("telegram: enable with stored master key failed; telegram integration disabled", "error", err)
 		} else {
