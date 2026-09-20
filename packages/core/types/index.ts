@@ -256,6 +256,8 @@ export type {
   TelegramInstallation,
   ListTelegramInstallationsResponse,
   RegisterTelegramRequest,
+  TelegramSettingsResponse,
+  SetTelegramSettingsRequest,
   RedeemTelegramBindingTokenResponse,
 } from "./telegram";
 export type {

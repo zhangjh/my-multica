@@ -263,3 +263,90 @@ func (h *Handler) RedeemTelegramBindingToken(w http.ResponseWriter, r *http.Requ
 		TelegramUserID: redeemed.TelegramUserID,
 	})
 }
+
+// TelegramSettingsResponse is the management surface for the deployment-wide
+// Telegram master key. It never carries the key itself — only whether the
+// integration is currently configured.
+type TelegramSettingsResponse struct {
+	Configured bool `json:"configured"`
+}
+
+// GetTelegramSettings (GET /api/workspaces/{id}/telegram/settings) reports
+// whether the Telegram integration is configured. Admin-only at the router,
+// scoped to the workspace URL like the install/revoke endpoints (in a
+// self-hosted deployment the owning workspace's owners/admins are the
+// deployment operators).
+func (h *Handler) GetTelegramSettings(w http.ResponseWriter, r *http.Request) {
+	if _, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "workspace id"); !ok {
+		return
+	}
+	if h.TelegramManager == nil {
+		writeJSON(w, http.StatusOK, TelegramSettingsResponse{Configured: false})
+		return
+	}
+	writeJSON(w, http.StatusOK, TelegramSettingsResponse{Configured: h.TelegramManager.Configured()})
+}
+
+// SetTelegramSettingsRequest is the body for enabling Telegram: the
+// base64-encoded 32-byte master key that encrypts per-agent bot tokens at
+// rest. Mirrors what self-hosters would otherwise put in
+// MULTICA_TELEGRAM_SECRET_KEY.
+type SetTelegramSettingsRequest struct {
+	SecretKey string `json:"secret_key"`
+}
+
+// SetTelegramSettings (PUT /api/workspaces/{id}/telegram/settings) validates
+// the pasted master key, persists it to the single-row store, and hot-enables
+// the Telegram integration — no server restart, no env edit. Admin-only at
+// the router.
+func (h *Handler) SetTelegramSettings(w http.ResponseWriter, r *http.Request) {
+	if _, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "workspace id"); !ok {
+		return
+	}
+	if h.TelegramManager == nil {
+		writeError(w, http.StatusServiceUnavailable, "telegram integration not configured")
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	userUUID, ok := parseUUIDOrBadRequest(w, userID, "user id")
+	if !ok {
+		return
+	}
+	var body SetTelegramSettingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	key, err := telegram.ParseMasterKey(body.SecretKey)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := h.TelegramManager.StoreKeyAndEnable(r.Context(), key, userUUID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to enable telegram integration")
+		return
+	}
+	writeJSON(w, http.StatusOK, TelegramSettingsResponse{Configured: true})
+}
+
+// DeleteTelegramSettings (DELETE /api/workspaces/{id}/telegram/settings)
+// disables the Telegram integration: clears the stored master key, stops
+// every active bot's polling loop (installations are revoked, not deleted —
+// chat history stays), and hot-reloads the runtime. Admin-only at the router.
+func (h *Handler) DeleteTelegramSettings(w http.ResponseWriter, r *http.Request) {
+	if _, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "workspace id"); !ok {
+		return
+	}
+	if h.TelegramManager == nil {
+		writeError(w, http.StatusServiceUnavailable, "telegram integration not configured")
+		return
+	}
+	if err := h.TelegramManager.Disable(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to disable telegram integration")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

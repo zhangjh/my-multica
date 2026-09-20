@@ -196,6 +196,8 @@ import type {
   TelegramInstallation,
   ListTelegramInstallationsResponse,
   RegisterTelegramRequest,
+  TelegramSettingsResponse,
+  SetTelegramSettingsRequest,
   RedeemTelegramBindingTokenResponse,
   Squad,
   SquadMember,
@@ -365,9 +367,11 @@ import {
   EMPTY_REDEEM_WECOM_BINDING_TOKEN_RESPONSE,
   TelegramInstallationSchema,
   ListTelegramInstallationsResponseSchema,
+  TelegramSettingsResponseSchema,
   RedeemTelegramBindingTokenResponseSchema,
   EMPTY_TELEGRAM_INSTALLATION,
   EMPTY_LIST_TELEGRAM_INSTALLATIONS_RESPONSE,
+  EMPTY_TELEGRAM_SETTINGS_RESPONSE,
   EMPTY_REDEEM_TELEGRAM_BINDING_TOKEN_RESPONSE,
   EMPTY_BILLING_BALANCE,
   EMPTY_BILLING_TRANSACTIONS_PAGE,
@@ -4785,6 +4789,38 @@ export class ApiClient {
 
   async deleteTelegramInstallation(workspaceId: string, installationId: string): Promise<void> {
     await this.fetch(`/api/workspaces/${workspaceId}/telegram/installations/${installationId}`, {
+      method: "DELETE",
+    });
+  }
+
+  /** Deployment-wide Telegram master-key state. The key itself is write-only;
+   * this only reports whether the integration is configured. */
+  async getTelegramSettings(workspaceId: string): Promise<TelegramSettingsResponse> {
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/telegram/settings`);
+    return parseWithFallback(raw, TelegramSettingsResponseSchema, EMPTY_TELEGRAM_SETTINGS_RESPONSE, {
+      endpoint: "GET /api/workspaces/:id/telegram/settings",
+    });
+  }
+
+  /** Enable Telegram by storing the base64-encoded 32-byte master key. The
+   * server persists it and hot-enables the integration — no restart. */
+  async updateTelegramSettings(
+    workspaceId: string,
+    body: SetTelegramSettingsRequest,
+  ): Promise<TelegramSettingsResponse> {
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/telegram/settings`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    return parseWithFallback(raw, TelegramSettingsResponseSchema, EMPTY_TELEGRAM_SETTINGS_RESPONSE, {
+      endpoint: "PUT /api/workspaces/:id/telegram/settings",
+    });
+  }
+
+  /** Disable Telegram: clears the stored master key and stops every active
+   * bot's polling loop. Installations are revoked, not deleted. */
+  async clearTelegramSettings(workspaceId: string): Promise<void> {
+    await this.fetch(`/api/workspaces/${workspaceId}/telegram/settings`, {
       method: "DELETE",
     });
   }

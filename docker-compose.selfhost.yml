@@ -177,6 +177,11 @@ services:
       # in the database, so this single deployment-wide key is all the operator
       # needs to set here.
       MULTICA_SLACK_SECRET_KEY: ${MULTICA_SLACK_SECRET_KEY:-}
+      # Telegram bot integration. MULTICA_TELEGRAM_SECRET_KEY is the opt-in:
+      # unset = integration disabled. It is a base64-encoded 32-byte at-rest
+      # key that encrypts each per-agent BotFather bot token (pasted via the
+      # agent's Connect Telegram flow) in the database.
+      MULTICA_TELEGRAM_SECRET_KEY: ${MULTICA_TELEGRAM_SECRET_KEY:-}
       # Self-hosted Git provider integration (Forgejo / Gitea / GitLab). This
       # is a self-host-only feature, so the compose file turns it on by default;
       # the managed cloud leaves it unset (off). It still needs a valid

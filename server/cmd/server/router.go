@@ -1075,44 +1075,69 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// install, one getUpdates long-polling loop per active installation
 	// supervised by the shared engine.Supervisor, resolvers on the generic
 	// channel_* tables, outbound streaming via throttled editMessageText on
-	// the event bus. Gated by MULTICA_TELEGRAM_SECRET_KEY (the at-rest token
-	// encryption key); when unset the handlers return 503 and no Factory is
-	// registered.
-	if telegramKey, err := secretbox.LoadKey("MULTICA_TELEGRAM_SECRET_KEY"); err == nil {
-		box, err := secretbox.New(telegramKey)
-		if err != nil {
-			slog.Error("telegram: secretbox.New failed; telegram integration disabled", "error", err)
-		} else {
-			telegramBindingSvc := telegram.NewBindingTokenService(queries, pool)
-			h.TelegramBindingTokens = telegramBindingSvc
-			telegramReplier := telegram.NewOutboundReplier(telegram.OutboundReplierConfig{
-				Binding: telegramBindingSvc,
-				Decrypt: box.Open,
-				// The bind link (/telegram/bind) is a web-app page: app URL, not
-				// the API URL. Mirrors the Slack replier.
-				AppURL: appURLFromEnv(),
-				Logger: slog.Default(),
-			})
-			telegramTyping := telegram.NewTypingNotifier(box.Open, "", nil, slog.Default())
-			channelRouter.Register(telegram.TypeTelegram, telegram.NewTelegramResolverSet(queries, pool, telegramReplier, telegramTyping))
-			telegramOutbound := telegram.NewOutbound(queries, box.Open, "", nil, slog.Default())
-			telegramOutbound.Register(bus)
-			h.TelegramOutbound = telegramOutbound
-
-			// Per-installation inbound: the Supervisor builds + supervises one
-			// long-polling loop per active Telegram installation.
-			telegram.RegisterTelegram(channelRegistry, telegram.ChannelDeps{Decrypt: box.Open, Logger: slog.Default()})
-
-			installSvc, ierr := telegram.NewInstallService(queries, pool, box, slog.Default())
-			if ierr != nil {
-				slog.Error("telegram: InstallService init failed; install disabled", "error", ierr)
-			} else {
-				h.TelegramInstall = installSvc
+	// the event bus.
+	//
+	// Unlike Slack/WeCom the deployment master key (the at-rest token
+	// encryption key) is NOT boot-only: owners/admins can set it live from the
+	// web UI (PUT /api/workspaces/{id}/telegram/settings), and it persists to
+	// the single-row telegram_master_config table. At boot a stored row wins;
+	// MULTICA_TELEGRAM_SECRET_KEY is the fallback. The Manager owns the runtime
+	// state — every transport is wired ONCE over its dynamic Decrypt closure so
+	// enable/disable never re-registers channels or bus subscribers. When
+	// disabled the handlers return 503 and no Factory is registered.
+	telegramManager := telegram.NewManager(telegram.ManagerConfig{
+		Queries: queries,
+		Tx:      pool,
+		Logger:  slog.Default(),
+		OnRuntimeChange: func(runtime *telegram.Runtime) {
+			var install *telegram.InstallService
+			if runtime != nil {
+				install = runtime.Install
 			}
-			slog.Info("telegram integration enabled (per-installation long polling)")
+			h.TelegramInstall = install
+		},
+	})
+	h.TelegramManager = telegramManager
+
+	telegramBindingSvc := telegram.NewBindingTokenService(queries, pool)
+	h.TelegramBindingTokens = telegramBindingSvc
+	telegramReplier := telegram.NewOutboundReplier(telegram.OutboundReplierConfig{
+		Binding: telegramBindingSvc,
+		Decrypt: telegramManager.Decrypt,
+		// The bind link (/telegram/bind) is a web-app page: app URL, not
+		// the API URL. Mirrors the Slack replier.
+		AppURL: appURLFromEnv(),
+		Logger: slog.Default(),
+	})
+	telegramTyping := telegram.NewTypingNotifier(telegramManager.Decrypt, "", nil, slog.Default())
+	channelRouter.Register(telegram.TypeTelegram, telegram.NewTelegramResolverSet(queries, pool, telegramReplier, telegramTyping))
+	telegramOutbound := telegram.NewOutbound(queries, telegramManager.Decrypt, "", nil, slog.Default())
+	telegramOutbound.Register(bus)
+	h.TelegramOutbound = telegramOutbound
+
+	// Per-installation inbound: the Supervisor builds + supervises one
+	// long-polling loop per active Telegram installation.
+	telegram.RegisterTelegram(channelRegistry, telegram.ChannelDeps{Decrypt: telegramManager.Decrypt, Logger: slog.Default()})
+
+	bootCtx := context.Background()
+	// Boot enable, in priority order: a key previously stored by an admin via
+	// the settings endpoint, then the MULTICA_TELEGRAM_SECRET_KEY env var.
+	// Enabling merely builds + republishes the Runtime; the Supervisor picks up
+	// active installations on its next sweep regardless.
+	if storedKey, ok := telegramManager.LoadStoredKey(bootCtx); ok {
+		if err := telegramManager.EnableKey(bootCtx, storedKey); err != nil {
+			slog.Error("telegram: enable with stored master key failed; telegram integration disabled", "error", err)
+		} else {
+			slog.Info("telegram integration enabled (admin-configured master key; per-installation long polling)")
+		}
+	} else if envKey, err := secretbox.LoadKey("MULTICA_TELEGRAM_SECRET_KEY"); err == nil {
+		if err := telegramManager.EnableKey(bootCtx, envKey); err != nil {
+			slog.Error("telegram: enable with MULTICA_TELEGRAM_SECRET_KEY failed; telegram integration disabled", "error", err)
+		} else {
+			slog.Info("telegram integration enabled (MULTICA_TELEGRAM_SECRET_KEY; per-installation long polling)")
 		}
 	} else {
-		slog.Info("telegram integration disabled (MULTICA_TELEGRAM_SECRET_KEY not set)")
+		slog.Info("telegram integration disabled (no master key; set one in workspace settings or via MULTICA_TELEGRAM_SECRET_KEY)")
 	}
 
 	// Composio integration (MUL-3720). Gated by COMPOSIO_API_KEY plus the
@@ -1730,6 +1755,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 				// Telegram integration. Same admin/member split as Slack:
 				// listing is member-visible; install + revoke are admin-only.
+				// The settings endpoints (deployment-wide master key) live in
+				// the admin group as well: in a self-hosted deployment the
+				// workspace owners/admins ARE the operators.
 				r.Group(func(r chi.Router) {
 					r.Use(middleware.RequireWorkspaceMemberFromURL(queries, "id"))
 					r.Get("/telegram/installations", h.ListTelegramInstallations)
@@ -1738,6 +1766,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Use(middleware.RequireWorkspaceRoleFromURL(queries, "id", "owner", "admin"))
 					r.Delete("/telegram/installations/{installationId}", h.RevokeTelegramInstallation)
 					r.Post("/telegram/install", h.RegisterTelegramBot)
+					r.Get("/telegram/settings", h.GetTelegramSettings)
+					r.Put("/telegram/settings", h.SetTelegramSettings)
+					r.Delete("/telegram/settings", h.DeleteTelegramSettings)
 				})
 			})
 		})

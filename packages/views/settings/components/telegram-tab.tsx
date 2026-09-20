@@ -101,19 +101,18 @@ export function TelegramTab() {
           </CardContent>
         </Card>
       ) : !configured ? (
-        <Card>
-          <CardContent className="space-y-2">
-            <p className="text-body font-medium">{t(($) => $.telegram.not_enabled_title)}</p>
-            <p className="text-caption text-muted-foreground">
-              {t(($) => $.telegram.not_enabled_description_prefix)}{" "}
-              <code className="rounded-xs bg-muted px-1 py-0.5 text-micro">
-                MULTICA_TELEGRAM_SECRET_KEY
-              </code>{" "}
-              {t(($) => $.telegram.not_enabled_description_suffix)}{" "}
-              {t(($) => $.telegram.not_enabled_self_host_hint)}
-            </p>
-          </CardContent>
-        </Card>
+        canManage ? (
+          <TelegramEnableForm wsId={wsId} />
+        ) : (
+          <Card>
+            <CardContent className="space-y-2">
+              <p className="text-body font-medium">{t(($) => $.telegram.not_enabled_title)}</p>
+              <p className="text-caption text-muted-foreground">
+                {t(($) => $.telegram.admin_only_hint)}
+              </p>
+            </CardContent>
+          </Card>
+        )
       ) : (
         <section className="space-y-3">
           <h2 className="text-body font-semibold">{t(($) => $.telegram.connected_bots)}</h2>
@@ -142,6 +141,7 @@ export function TelegramTab() {
               </CardContent>
             </Card>
           )}
+          {canManage && <TelegramDisableCard wsId={wsId} />}
         </section>
       )}
 
@@ -173,6 +173,159 @@ export function TelegramTab() {
         </AlertDialogContent>
       </AlertDialog>
     </div>
+  );
+}
+
+// TelegramEnableForm is the admin-only "turn Telegram on" card shown when the
+// deployment has no master key yet. The admin pastes the base64-encoded 32-byte
+// key (the same value self-hosters would set as MULTICA_TELEGRAM_SECRET_KEY);
+// the server persists it and hot-enables the integration — no restart.
+function TelegramEnableForm({ wsId }: { wsId: string }) {
+  const { t } = useT("settings");
+  const qc = useQueryClient();
+  const [secretKey, setSecretKey] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function handleSave() {
+    const secret_key = secretKey.trim();
+    if (saving || !secret_key) return;
+    setSaving(true);
+    try {
+      await api.updateTelegramSettings(wsId, { secret_key });
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: telegramKeys.settings(wsId) }),
+        qc.invalidateQueries({ queryKey: telegramKeys.installations(wsId) }),
+      ]);
+      toast.success(t(($) => $.telegram.master_key_saved_toast));
+      setSecretKey("");
+    } catch (e) {
+      toast.error(
+        e instanceof Error ? e.message : t(($) => $.telegram.master_key_save_failed),
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardContent className="space-y-4">
+        <div className="space-y-1">
+          <p className="text-body font-medium">{t(($) => $.telegram.master_key_title)}</p>
+          <p className="text-caption text-muted-foreground">
+            {t(($) => $.telegram.master_key_description)}
+          </p>
+        </div>
+
+        <div className="space-y-1.5">
+          <Label htmlFor="telegram-master-key">
+            {t(($) => $.telegram.master_key_label)}
+          </Label>
+          <Input
+            id="telegram-master-key"
+            data-testid="telegram-master-key"
+            type="password"
+            value={secretKey}
+            onChange={(e) => setSecretKey(e.target.value)}
+            // Format hint, not copy (base64 key shape).
+            placeholder="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+            autoComplete="off"
+            spellCheck={false}
+            disabled={saving}
+          />
+          <p className="text-micro text-muted-foreground">{t(($) => $.telegram.master_key_hint)}</p>
+        </div>
+
+        <div>
+          <Button
+            size="sm"
+            onClick={handleSave}
+            disabled={saving || secretKey.trim() === ""}
+            data-testid="telegram-master-key-save"
+          >
+            {saving ? t(($) => $.telegram.master_key_saving) : t(($) => $.telegram.master_key_save)}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// TelegramDisableCard is the admin-only "turn Telegram off" affordance shown
+// when the integration is configured. Disabling clears the stored master key
+// and stops every active bot's polling loop (installations are revoked, chat
+// history is kept, and a bot can be reconnected by pasting its token again).
+function TelegramDisableCard({ wsId }: { wsId: string }) {
+  const { t } = useT("settings");
+  const qc = useQueryClient();
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [disabling, setDisabling] = useState(false);
+
+  async function handleDisable() {
+    if (disabling) return;
+    setDisabling(true);
+    try {
+      await api.clearTelegramSettings(wsId);
+      await qc.invalidateQueries({ queryKey: telegramKeys.installations(wsId) });
+      await qc.invalidateQueries({ queryKey: telegramKeys.settings(wsId) });
+      toast.success(t(($) => $.telegram.toast_disabled));
+      setConfirmOpen(false);
+    } catch (e) {
+      toast.error(
+        e instanceof Error ? e.message : t(($) => $.telegram.toast_disable_failed),
+      );
+    } finally {
+      setDisabling(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardContent className="flex items-start justify-between gap-4">
+        <div className="space-y-1">
+          <p className="text-body font-medium">{t(($) => $.telegram.disable_title)}</p>
+          <p className="text-caption text-muted-foreground">
+            {t(($) => $.telegram.disable_description)}
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setConfirmOpen(true)}
+          disabled={disabling}
+          data-testid="telegram-disable"
+        >
+          <Trash2 className="h-3 w-3" />
+          {t(($) => $.telegram.disable_action)}
+        </Button>
+      </CardContent>
+
+      <AlertDialog
+        open={confirmOpen}
+        onOpenChange={(v) => {
+          if (!v && !disabling) setConfirmOpen(false);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t(($) => $.telegram.disable_confirm_title)}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t(($) => $.telegram.disable_confirm_description)}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={disabling}>
+              {t(($) => $.telegram.disable_confirm_cancel)}
+            </AlertDialogCancel>
+            <AlertDialogAction onClick={handleDisable} disabled={disabling}>
+              {disabling
+                ? t(($) => $.telegram.disabling)
+                : t(($) => $.telegram.disable_action)}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </Card>
   );
 }
 

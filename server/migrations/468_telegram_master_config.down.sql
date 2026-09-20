@@ -1,0 +1,1 @@
+DROP TABLE telegram_master_config;

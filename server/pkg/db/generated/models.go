@@ -1400,6 +1400,13 @@ type TaskUsageHourlyRollupState struct {
 	LastError         pgtype.Text        `json:"last_error"`
 }
 
+type TelegramMasterConfig struct {
+	ID              bool               `json:"id"`
+	SecretKeyBase64 string             `json:"secret_key_base64"`
+	UpdatedBy       pgtype.UUID        `json:"updated_by"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
 type User struct {
 	ID                      pgtype.UUID        `json:"id"`
 	Name                    string             `json:"name"`

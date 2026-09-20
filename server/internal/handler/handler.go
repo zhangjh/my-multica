@@ -345,8 +345,14 @@ type Handler struct {
 
 	// TelegramInstall owns the Telegram bot install lifecycle (register a
 	// pasted BotFather token / list / revoke) and the at-rest encryption of
-	// each bot's token. Nil unless MULTICA_TELEGRAM_SECRET_KEY is set.
+	// each bot's token. Nil unless Telegram is configured.
 	TelegramInstall *telegram.InstallService
+	// TelegramManager owns the runtime enable/disable state of the Telegram
+	// integration. Nil when the manager was not wired (e.g. tests). The admin
+	// settings endpoints read its state and set/clear the master key; every
+	// hot toggle republishes TelegramInstall / TelegramBindingTokens /
+	// TelegramOutbound through the manager's sink.
+	TelegramManager *telegram.Manager
 	// TelegramBindingTokens mints/redeems the user-binding tokens behind the
 	// "link your Telegram account" prompt. Nil unless Telegram is configured.
 	TelegramBindingTokens *telegram.BindingTokenService

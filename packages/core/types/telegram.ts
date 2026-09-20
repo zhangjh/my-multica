@@ -37,6 +37,19 @@ export interface RegisterTelegramRequest {
   bot_token: string;
 }
 
+/** Deployment-wide Telegram master-key state. The key itself is write-only:
+ * it is accepted by `SetTelegramSettingsRequest` and never returned. Mirrors
+ * `TelegramSettingsResponse` in `server/internal/handler/telegram.go`. */
+export interface TelegramSettingsResponse {
+  configured: boolean;
+}
+
+/** Request body for enabling Telegram: the base64-encoded 32-byte at-rest key
+ * (what self-hosters would otherwise put in MULTICA_TELEGRAM_SECRET_KEY). */
+export interface SetTelegramSettingsRequest {
+  secret_key: string;
+}
+
 /** Post-redemption echo: the Telegram user id the token carried is now bound
  * to the logged-in Multica user in this workspace/installation. */
 export interface RedeemTelegramBindingTokenResponse {

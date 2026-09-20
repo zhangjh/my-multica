@@ -44,6 +44,7 @@ import type {
   RedeemWecomBindingTokenResponse,
   TelegramInstallation,
   ListTelegramInstallationsResponse,
+  TelegramSettingsResponse,
   RedeemTelegramBindingTokenResponse,
   GroupedIssuesResponse,
   GitHubConnectResponse,
@@ -3177,6 +3178,14 @@ export const ListTelegramInstallationsResponseSchema = z.object({
 
 export const EMPTY_LIST_TELEGRAM_INSTALLATIONS_RESPONSE: ListTelegramInstallationsResponse = {
   installations: [],
+  configured: false,
+};
+
+export const TelegramSettingsResponseSchema = z.object({
+  configured: z.boolean().default(false),
+}).loose();
+
+export const EMPTY_TELEGRAM_SETTINGS_RESPONSE: TelegramSettingsResponse = {
   configured: false,
 };
 

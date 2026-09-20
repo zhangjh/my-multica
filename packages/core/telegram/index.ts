@@ -1,1 +1,5 @@
-export { telegramKeys, telegramInstallationsOptions } from "./queries";
+export {
+  telegramKeys,
+  telegramInstallationsOptions,
+  telegramSettingsOptions,
+} from "./queries";
