@@ -724,6 +724,23 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					// connection badge refreshes on every workspace client, not just
 					// the tab that polls the install status to success.
 					regSvc.SetEventBus(bus)
+					// In-flight bind sessions must be readable by every
+					// replica: the dialog polls the status endpoint every
+					// ~5s and any replica can receive that poll. With the
+					// state in one process's memory, a poll routed
+					// elsewhere 404'd and the dialog reported "session
+					// lost" ~5s after the QR rendered (MUL-7340).
+					//
+					// Without Redis the service keeps its in-process
+					// store. That is correct for local development and a
+					// single replica, and wrong for a multi-replica deploy
+					// — which is why this says so out loud instead of
+					// failing quietly at the first status poll.
+					if rdb != nil {
+						regSvc.SetInstallSessionStore(lark.NewRedisInstallSessionStore(rdb))
+					} else {
+						slog.Warn("lark device-flow install: no Redis; bind sessions are per-process and will not survive a multi-replica deployment")
+					}
 					h.LarkRegistration = regSvc
 					slog.Info("lark device-flow install enabled")
 				}
@@ -858,7 +875,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				AppURL:  appURLFromEnv(),
 				Logger:  slog.Default(),
 			})
-			ack := dingtalk.NewAckNotifier(dingtalkClient, box.Open, slog.Default())
+			ack := dingtalk.NewAckNotifier(dingtalkClient, box.Open, slog.Default(), queries)
 			var media engine.MediaResolver
 			if store != nil {
 				media = dingtalk.NewMediaResolver(
@@ -871,7 +888,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			}
 			botNames := dingtalk.NewBotNameResolver(dingtalkClient, box.Open)
 			channelRouter.Register(dingtalk.TypeDingTalk, dingtalk.NewDingTalkResolverSet(queries, pool, replier, ack, media, botNames))
-			dingtalk.NewOutbound(queries, box.Open, dingtalkClient, slog.Default()).Register(bus)
+			dingtalk.NewOutbound(queries, box.Open, dingtalkClient, ack, slog.Default()).Register(bus)
 			dingtalk.RegisterDingTalk(channelRegistry, dingtalk.ChannelDeps{
 				Decrypt:  box.Open,
 				Client:   dingtalkClient,
@@ -1505,6 +1522,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Post("/tasks/{taskId}/messages", h.ReportTaskMessages)
 		r.Get("/tasks/{taskId}/messages", h.ListTaskMessages)
 		r.Post("/tasks/{taskId}/cancel-ack", h.AckTaskCancelled)
+		r.Post("/tasks/{taskId}/steers/claim", h.ClaimCommentSteer)
+		r.Post("/tasks/{taskId}/steers/{commentId}/ack", h.AckCommentSteer)
 
 		r.Post("/workspaces/{workspaceId}/issues/gc-check", h.BatchIssueGCCheck)
 		r.Get("/issues/{issueId}/gc-check", h.GetIssueGCCheck)
@@ -1535,7 +1554,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// signed-in user's session and the installation header. Keeping it outside
 	// /v1 prevents the Public API from accepting session cookies.
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.Auth(queries, patCache, cloudPATVerifier))
+		r.Use(middleware.Auth(queries, patCache, cloudPATVerifier, cfSigner))
 		r.Route(pluginBridgePrefix, func(r chi.Router) {
 			registerPluginActionRoutes(r, h)
 			// ui / manual only. `event` is dispatched by the host off the event
@@ -1545,7 +1564,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	})
 
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.Auth(queries, patCache, cloudPATVerifier))
+		r.Use(middleware.Auth(queries, patCache, cloudPATVerifier, cfSigner))
 		r.Use(middleware.RefreshCloudFrontCookies(cfSigner))
 
 		// Plugin Action API. Called by the HOST PAGE on the signed-in user's
@@ -1571,6 +1590,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Post("/api/me/onboarding/runtime-bootstrap", h.BootstrapOnboardingRuntime)
 		r.Post("/api/me/onboarding/no-runtime-bootstrap", h.BootstrapOnboardingNoRuntime)
 		r.Post("/api/cli-token", h.IssueCliToken)
+		// Sliding session renewal for clients that hold the session as a
+		// string (Desktop, mobile). Browsers get theirs re-issued inline by
+		// middleware.Auth and never call this (MUL-7436).
+		r.Post("/api/auth/refresh", h.RefreshSession)
 		r.Post("/api/upload-file", h.UploadFile)
 		r.Post("/api/feedback", h.CreateFeedback)
 		r.With(handler.RequireHumanActor).Post("/api/client-usage", h.UpsertClientUsage)
@@ -1930,6 +1953,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Post("/subscribe", h.SubscribeToIssue)
 					r.Post("/unsubscribe", h.UnsubscribeFromIssue)
 					r.Post("/unsubscribe/subtree", h.UnsubscribeFromIssueSubtree)
+					r.Get("/wakeups", h.ListIssueWakeups)
+					r.Post("/wakeups", h.CreateIssueWakeup)
+					r.Put("/wakeups/{wakeupID}", h.CreateIssueWakeup)
+					r.Post("/wakeups/{wakeupID}/disable", h.DisableIssueWakeup)
+					r.Post("/wakeups/{wakeupID}/enable", h.EnableIssueWakeup)
+					r.Patch("/wakeups/{wakeupID}/instruction", h.EditIssueWakeupInstruction)
 					r.Get("/active-task", h.GetActiveTaskForIssue)
 					r.Post("/tasks/{taskId}/cancel", h.CancelTask)
 					r.Post("/rerun", h.RerunIssue)
@@ -2102,6 +2131,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.With(handler.RequireHumanActor).Post("/sub-issues", h.CreateCommentSubIssue)
 				r.Put("/", h.UpdateComment)
 				r.Delete("/", h.DeleteComment)
+				// Same handler under a path servers from before #8296 do not
+				// route. Clients that promise "replies are kept" call this one,
+				// so a request that reaches an older server — mid-rollout, after
+				// a rollback, or self-hosted — fails instead of deleting the
+				// replies with the comment.
+				r.Delete("/keep-replies", h.DeleteComment)
 				r.Post("/resolve", h.ResolveComment)
 				r.Delete("/resolve", h.UnresolveComment)
 				r.Post("/reactions", h.AddReaction)
@@ -2257,6 +2292,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			// Workspace-wide agent task snapshot for presence derivation:
 			// every active task + each agent's most recent terminal task.
 			r.Get("/api/agent-task-snapshot", h.ListWorkspaceAgentTaskSnapshot)
+			r.Get("/api/issue-wakeup-summaries", h.ListWorkspaceWakeupSummaries)
+			r.Get("/api/issue-wakeups", h.ListWorkspaceWakeups)
 
 			// Independent workspace-level list backing the issues-header
 			// "agents working" chip and its assignee-id Table filter.
@@ -2319,6 +2356,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				// Separate from "/" so the main list keeps its contract and
 				// never carries the unbounded archive.
 				r.Get("/archived", h.ListArchivedInbox)
+				r.Get("/archived/page", h.ListArchivedInboxPage)
+				r.Get("/archived/facets", h.GetArchivedInboxFacets)
 				r.Get("/unread-count", h.CountUnreadInbox)
 				// Cross-workspace unread summary: account-level, keyed on the
 				// user. Backs the workspace-switcher dot for OTHER workspaces.

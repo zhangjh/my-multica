@@ -61,6 +61,10 @@ const (
 	// work, so such a daemon keeps getting a fresh directory and the parent's
 	// stays untouched on disk.
 	DaemonCapabilityCheckoutKeepsWorkV1 = "checkout-keeps-work-v1"
+	// DaemonCapabilityTaskSteerV1 advertises lossless human-comment delivery to
+	// an already-running Codex or Claude turn. Servers must fall back to the
+	// existing follow-up path when this capability is absent.
+	DaemonCapabilityTaskSteerV1 = "task-steer-v1"
 
 	// AppCapabilityChatDraftRestoreV1 is advertised (X-Client-Capabilities) by
 	// app clients that understand the durable draft-restore recovery path:
@@ -151,6 +155,7 @@ const (
 	PendingWorkKindModelList        = "model_list"
 	PendingWorkKindLocalSkills      = "local_skills"
 	PendingWorkKindLocalSkillImport = "local_skill_import"
+	PendingWorkKindTaskSteer        = "task_steer"
 )
 
 // PendingWorkPayload is sent from server to daemon as a wakeup hint when a
@@ -199,6 +204,8 @@ type ChatQuickActionsPayload struct {
 
 // TaskMessagePayload represents a single agent execution message (tool call, text, etc.)
 type TaskMessagePayload struct {
+	// CallID is an opaque tool-call identity scoped to one backend execution.
+	CallID  string         `json:"call_id,omitempty"`
 	TaskID  string         `json:"task_id"`
 	IssueID string         `json:"issue_id,omitempty"`
 	Seq     int            `json:"seq"`
