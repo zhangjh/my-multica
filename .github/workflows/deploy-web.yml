@@ -21,6 +21,7 @@ on:
     branches: [trunk]
     paths:
       - apps/web/**
+      - .github/workflows/deploy-web.yml
       - packages/core/**
       - packages/ui/**
       - packages/views/**
