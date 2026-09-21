@@ -17,7 +17,7 @@ name: Deploy web to Cloudflare Workers
 # wrangler.toml [vars].
 on:
   push:
-    branches: [main]
+    branches: [trunk]
     paths:
       - apps/web/**
       - packages/core/**
