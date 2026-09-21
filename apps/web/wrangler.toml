@@ -12,11 +12,16 @@ binding = "ASSETS"
 # DNS-only record -> VPS nginx -> 127.0.0.1:8080, with a Let's Encrypt cert),
 # so REMOTE_API_URL is deliberately left unset here — server-side reverse-
 # proxying of /api,/ws,/auth,/uploads from the Worker is not used in this
-# topology. NEXT_PUBLIC_API_URL instead IS a NEXT_PUBLIC_* var and must be
-# baked at BUILD time (Next inlines it), so it is passed as an env var to
-# `opennextjs-cloudflare build`, not declared here.
+# topology. NEXT_PUBLIC_API_URL / NEXT_PUBLIC_WS_URL are NEXT_PUBLIC_* vars:
+# Next inlines them at BUILD time, so they are also passed as env vars to
+# `opennextjs-cloudflare build` in .github/workflows/deploy-web.yml. They are
+# declared here in [vars] as well so the deployed Worker config always carries
+# them (a wrangler deploy / Cloudflare-side sync treats this file as the sole
+# source for variables and would drop anything configured in the Dashboard).
 
 [vars]
+NEXT_PUBLIC_API_URL = "https://api.tx-multica.zhangjh.cn"
+NEXT_PUBLIC_WS_URL = "https://api.tx-multica.zhangjh.cn/ws"
 
 # services self-binding for the OpenNext Worker (see @opennextjs/cloudflare
 # get-started). Kept matching `name` above.

@@ -12,9 +12,10 @@ name: Deploy web to Cloudflare Workers
 # The Worker runs the Next.js app for the web UI only. The browser talks to
 # the backend API/WS directly at https://api.tx-multica.zhangjh.cn (a grey
 # DNS-only record -> VPS nginx -> 127.0.0.1:8080, with a Let's Encrypt cert).
-# NEXT_PUBLIC_API_URL is a NEXT_PUBLIC_* var: Next inlines it at build time,
-# so it is set below on the Build step and is deliberately absent from
-# wrangler.toml [vars].
+# NEXT_PUBLIC_API_URL / NEXT_PUBLIC_WS_URL are NEXT_PUBLIC_* vars: Next
+# inlines them at build time, so they are set below on the Build step (each
+# appears again in wrangler.toml [vars] so the deployed Worker config and any
+# Cloudflare-side build sync both keep them).
 on:
   push:
     branches: [trunk]
@@ -59,6 +60,7 @@ jobs:
         run: pnpm run build:pages
         env:
           NEXT_PUBLIC_API_URL: https://api.tx-multica.zhangjh.cn
+          NEXT_PUBLIC_WS_URL: https://api.tx-multica.zhangjh.cn/ws
           DEPLOY_TARGET: cloudflare
 
       - name: Deploy (wrangler)
