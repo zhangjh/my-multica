@@ -1850,6 +1850,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			r.Get("/", h.ListPersonalAccessTokens)
 			r.Post("/", h.CreatePersonalAccessToken)
 			r.Post("/current/renew", h.RenewCurrentPersonalAccessToken)
+			r.Post("/{id}/reveal", h.RevealPersonalAccessToken)
 			r.Delete("/{id}", h.RevokePersonalAccessToken)
 		})
 

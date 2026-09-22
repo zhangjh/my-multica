@@ -71,6 +71,7 @@ import type {
   PersonalAccessToken,
   CreatePersonalAccessTokenRequest,
   CreatePersonalAccessTokenResponse,
+  RevealPersonalAccessTokenResponse,
   RuntimeUsage,
   IssueUsageSummary,
   RuntimeHourlyActivity,
@@ -3489,6 +3490,10 @@ export class ApiClient {
 
   async revokePersonalAccessToken(id: string): Promise<void> {
     await this.fetch(`/api/tokens/${id}`, { method: "DELETE" });
+  }
+
+  async revealPersonalAccessToken(id: string): Promise<RevealPersonalAccessTokenResponse> {
+    return this.fetch(`/api/tokens/${id}/reveal`, { method: "POST" });
   }
 
   // File Upload & Attachments

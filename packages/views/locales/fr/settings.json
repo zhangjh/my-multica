@@ -671,6 +671,9 @@
     "toast_create_failed": "Échec de la création du jeton",
     "toast_revoked": "Jeton révoqué",
     "toast_revoke_failed": "Échec de la révocation du jeton",
+    "toast_reveal_failed": "Échec de l'affichage du jeton",
+    "reveal_aria": "Afficher le jeton pour {{name}}",
+    "reveal_tooltip": "Afficher le jeton",
     "metadata_prefix": "{{prefix}}... · Créé {{created}} · {{lastUsed}}",
     "last_used_with_date": "Dernière utilisation {{date}}",
     "last_used_never": "Jamais utilisé",
@@ -685,13 +688,19 @@
     },
     "created_dialog": {
       "title": "Jeton d'accès personnel créé",
-      "warning_prefix": "Votre nouveau jeton d'accès personnel a été créé. Pour des raisons de sécurité, il n'est ",
-      "warning_emphasis": "affiché qu'une seule fois",
-      "warning_suffix": " — conservez-le en lieu sûr et ne le partagez jamais. Un jeton perdu ne peut pas être récupéré ; révoquez-le et créez-en un nouveau.",
+      "warning_prefix": "Conservez-le en lieu sûr et ne le partagez jamais. Si vous l'égarez, vous pouvez le ",
+      "warning_emphasis": "réafficher à tout moment",
+      "warning_suffix": " depuis la liste des jetons d'API.",
       "confirm_stored": "J'ai conservé ce jeton en lieu sûr.",
       "copy_tooltip": "Copier le jeton",
       "cli_hint": "Connectez-vous au CLI avec :",
       "copy_command_tooltip": "Copier la commande",
+      "done": "Terminé"
+    },
+    "reveal_dialog": {
+      "title": "Jeton d'API {{name}}",
+      "warning": "Traitez ce jeton comme un mot de passe — ne le partagez avec personne.",
+      "copy_tooltip": "Copier le jeton",
       "done": "Terminé"
     },
     "purpose": "S’authentifier auprès du CLI et de l’API.",

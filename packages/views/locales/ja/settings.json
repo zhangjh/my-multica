@@ -669,6 +669,9 @@
     "toast_create_failed": "トークンを作成できませんでした",
     "toast_revoked": "トークンを失効しました",
     "toast_revoke_failed": "トークンを失効できませんでした",
+    "toast_reveal_failed": "トークンを表示できませんでした",
+    "reveal_aria": "{{name}} のトークンを表示",
+    "reveal_tooltip": "トークンを表示",
     "metadata_prefix": "{{prefix}}... · 作成 {{created}} · {{lastUsed}}",
     "last_used_with_date": "最終使用 {{date}}",
     "last_used_never": "未使用",
@@ -683,13 +686,19 @@
     },
     "created_dialog": {
       "title": "個人アクセストークンを作成しました",
-      "warning_prefix": "新しい個人アクセストークンを作成しました。セキュリティ上の理由により、表示されるのは",
-      "warning_emphasis": "今回の一度だけ",
-      "warning_suffix": "です。安全に保管し、共有しないでください。紛失したトークンは復元できないため、失効して新しく作成してください。",
+      "warning_prefix": "安全に保管し、共有しないでください。紛失した場合は、",
+      "warning_emphasis": "いつでも再表示",
+      "warning_suffix": "できます（API トークン一覧より）。",
       "confirm_stored": "このトークンを安全に保管しました。",
       "copy_tooltip": "トークンをコピー",
       "cli_hint": "次のコマンドで CLI にログインできます:",
       "copy_command_tooltip": "コマンドをコピー",
+      "done": "完了"
+    },
+    "reveal_dialog": {
+      "title": "{{name}} の API トークン",
+      "warning": "このトークンはパスワードと同様に扱い、誰にも共有しないでください。",
+      "copy_tooltip": "トークンをコピー",
       "done": "完了"
     },
     "purpose": "CLI と API の認証に使用します。",

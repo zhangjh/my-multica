@@ -1,6 +1,6 @@
 -- name: CreatePersonalAccessToken :one
-INSERT INTO personal_access_token (user_id, name, token_hash, token_prefix, expires_at)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO personal_access_token (user_id, name, token_hash, token_prefix, expires_at, token_cipher)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING *;
 
 -- name: GetPersonalAccessTokenByHash :one
@@ -14,6 +14,10 @@ SELECT * FROM personal_access_token
 WHERE user_id = $1
   AND revoked = FALSE
 ORDER BY created_at DESC;
+
+-- name: GetPersonalAccessTokenForReveal :one
+SELECT id, name, token_cipher FROM personal_access_token
+WHERE id = $1 AND user_id = $2 AND revoked = FALSE;
 
 -- name: RevokePersonalAccessToken :one
 UPDATE personal_access_token

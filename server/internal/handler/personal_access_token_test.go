@@ -24,6 +24,10 @@ func insertTestPAT(t *testing.T, expiresAt time.Time) (string, string) {
 	if err != nil {
 		t.Fatalf("generate pat: %v", err)
 	}
+	cipher, err := auth.EncryptPATToken(raw)
+	if err != nil {
+		t.Fatalf("encrypt pat: %v", err)
+	}
 	prefix := raw
 	if len(prefix) > 12 {
 		prefix = prefix[:12]
@@ -33,6 +37,7 @@ func insertTestPAT(t *testing.T, expiresAt time.Time) (string, string) {
 		Name:        "renew-test",
 		TokenHash:   auth.HashToken(raw),
 		TokenPrefix: prefix,
+		TokenCipher: cipher,
 		ExpiresAt:   pgtype.Timestamptz{Time: expiresAt, Valid: !expiresAt.IsZero()},
 	})
 	if err != nil {
@@ -340,6 +345,10 @@ func TestRenewPAT_RejectsTokenBelongingToDifferentUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate pat: %v", err)
 	}
+	cipher, err := auth.EncryptPATToken(raw)
+	if err != nil {
+		t.Fatalf("encrypt pat: %v", err)
+	}
 	prefix := raw
 	if len(prefix) > 12 {
 		prefix = prefix[:12]
@@ -349,6 +358,7 @@ func TestRenewPAT_RejectsTokenBelongingToDifferentUser(t *testing.T) {
 		Name:        "other-renew",
 		TokenHash:   auth.HashToken(raw),
 		TokenPrefix: prefix,
+		TokenCipher: cipher,
 		ExpiresAt:   pgtype.Timestamptz{Time: time.Now().Add(3 * 24 * time.Hour), Valid: true},
 	})
 	if err != nil {
@@ -363,5 +373,132 @@ func TestRenewPAT_RejectsTokenBelongingToDifferentUser(t *testing.T) {
 	testHandler.RenewCurrentPersonalAccessToken(w, newRenewRequest(raw))
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 on user mismatch, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// newRevealRequest builds a POST /api/tokens/{id}/reveal request carrying the
+// shared test user's X-User-ID header, with the requested id as the URL param.
+func newRevealRequest(id string) *http.Request {
+	req := newRequest("POST", "/api/tokens/"+id+"/reveal", nil)
+	return withURLParam(req, "id", id)
+}
+
+func decodeRevealResponse(t *testing.T, body *httptest.ResponseRecorder) RevealPATResponse {
+	t.Helper()
+	var resp RevealPATResponse
+	if err := json.NewDecoder(body.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode reveal response: %v (body: %s)", err, body.Body.String())
+	}
+	return resp
+}
+
+func TestRevealPAT_ReturnsStoredToken(t *testing.T) {
+	raw, patID := insertTestPAT(t, time.Now().Add(3*24*time.Hour))
+
+	w := httptest.NewRecorder()
+	testHandler.RevealPersonalAccessToken(w, newRevealRequest(patID))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := decodeRevealResponse(t, w).Token; got != raw {
+		t.Fatalf("revealed token %q, want %q", got, raw)
+	}
+}
+
+func TestRevealPAT_RejectsAnotherUsersToken(t *testing.T) {
+	ctx := context.Background()
+	var otherUserID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO "user" (name, email)
+		VALUES ($1, $2)
+		RETURNING id
+	`, "Reveal Other", "other-reveal@multica.ai").Scan(&otherUserID); err != nil {
+		t.Fatalf("create other user: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM "user" WHERE id = $1`, parseUUID(otherUserID))
+	})
+
+	raw, err := auth.GeneratePATToken()
+	if err != nil {
+		t.Fatalf("generate pat: %v", err)
+	}
+	cipher, err := auth.EncryptPATToken(raw)
+	if err != nil {
+		t.Fatalf("encrypt pat: %v", err)
+	}
+	pat, err := testHandler.Queries.CreatePersonalAccessToken(ctx, db.CreatePersonalAccessTokenParams{
+		UserID:      parseUUID(otherUserID),
+		Name:        "other-reveal",
+		TokenHash:   auth.HashToken(raw),
+		TokenPrefix: raw[:12],
+		TokenCipher: cipher,
+		ExpiresAt:   pgtype.Timestamptz{Time: time.Now().Add(3 * 24 * time.Hour), Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("create other pat: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM personal_access_token WHERE id = $1`, pat.ID)
+	})
+
+	w := httptest.NewRecorder()
+	testHandler.RevealPersonalAccessToken(w, newRevealRequest(uuidToString(pat.ID)))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for another user's token, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRevealPAT_RejectsRevokedToken(t *testing.T) {
+	_, patID := insertTestPAT(t, time.Now().Add(3*24*time.Hour))
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE personal_access_token SET revoked = TRUE WHERE id = $1`, parseUUID(patID),
+	); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	testHandler.RevealPersonalAccessToken(w, newRevealRequest(patID))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for revoked token, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRevealPAT_RejectsMalformedID(t *testing.T) {
+	req := newRequest("POST", "/api/tokens/not-a-uuid/reveal", nil)
+	req = withURLParam(req, "id", "not-a-uuid")
+	w := httptest.NewRecorder()
+	testHandler.RevealPersonalAccessToken(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for malformed id, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRevealPAT_RejectsLegacyTokenWithoutCipher(t *testing.T) {
+	// Simulate a PAT minted before this feature: raw token hashed but no
+	// token_cipher stored. Reveal must 404 with a clear message.
+	raw, err := auth.GeneratePATToken()
+	if err != nil {
+		t.Fatalf("generate pat: %v", err)
+	}
+	pat, err := testHandler.Queries.CreatePersonalAccessToken(context.Background(), db.CreatePersonalAccessTokenParams{
+		UserID:      parseUUID(testUserID),
+		Name:        "legacy-reveal",
+		TokenHash:   auth.HashToken(raw),
+		TokenPrefix: raw[:12],
+		TokenCipher: "",
+		ExpiresAt:   pgtype.Timestamptz{Time: time.Now().Add(3 * 24 * time.Hour), Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("create legacy pat: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM personal_access_token WHERE id = $1`, pat.ID)
+	})
+
+	w := httptest.NewRecorder()
+	testHandler.RevealPersonalAccessToken(w, newRevealRequest(uuidToString(pat.ID)))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for legacy token, got %d: %s", w.Code, w.Body.String())
 	}
 }

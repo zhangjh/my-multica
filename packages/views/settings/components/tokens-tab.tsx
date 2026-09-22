@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { Trash2, Copy, Check, Info } from "lucide-react";
+import { Trash2, Copy, Check, Info, Eye } from "lucide-react";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@multica/ui/components/ui/tooltip";
 import type { PersonalAccessToken } from "@multica/core/types";
 import { Alert, AlertDescription } from "@multica/ui/components/ui/alert";
@@ -59,6 +59,10 @@ export function TokensTab() {
   const [storedConfirmed, setStoredConfirmed] = useState(false);
   const [tokenRevoking, setTokenRevoking] = useState<string | null>(null);
   const [revokeConfirmId, setRevokeConfirmId] = useState<string | null>(null);
+  const [tokenRevealing, setTokenRevealing] = useState<string | null>(null);
+  const [revealedToken, setRevealedToken] = useState<string | null>(null);
+  const [revealedName, setRevealedName] = useState("");
+  const [revealCopied, setRevealCopied] = useState(false);
   const [tokensLoading, setTokensLoading] = useState(true);
   const [tokensLoadFailed, setTokensLoadFailed] = useState(false);
 
@@ -104,6 +108,33 @@ export function TokensTab() {
     } finally {
       setTokenRevoking(null);
     }
+  };
+
+  const handleRevealToken = async (id: string, name: string) => {
+    setTokenRevealing(id);
+    try {
+      const result = await api.revealPersonalAccessToken(id);
+      setRevealedName(name);
+      setRevealedToken(result.token);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : t(($) => $.tokens.toast_reveal_failed));
+    } finally {
+      setTokenRevealing(null);
+    }
+  };
+
+  const handleCopyRevealedToken = async () => {
+    if (!revealedToken) return;
+    if (await copyText(revealedToken)) {
+      setRevealCopied(true);
+      setTimeout(() => setRevealCopied(false), 2000);
+    }
+  };
+
+  const closeRevealDialog = () => {
+    setRevealedToken(null);
+    setRevealedName("");
+    setRevealCopied(false);
   };
 
   const handleCopyToken = async () => {
@@ -224,6 +255,22 @@ export function TokensTab() {
                         <Button
                           variant="ghost"
                           size="icon-sm"
+                          onClick={() => handleRevealToken(token.id, token.name)}
+                          disabled={tokenRevealing === token.id}
+                          aria-label={t(($) => $.tokens.reveal_aria, { name: token.name })}
+                        >
+                          <Eye className="h-3.5 w-3.5" />
+                        </Button>
+                      }
+                    />
+                    <TooltipContent>{t(($) => $.tokens.reveal_tooltip)}</TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
                           onClick={() => setRevokeConfirmId(token.id)}
                           disabled={tokenRevoking === token.id}
                           aria-label={t(($) => $.tokens.revoke_aria, { name: token.name })}
@@ -330,6 +377,45 @@ export function TokensTab() {
             </label>
             <Button disabled={!storedConfirmed} onClick={closeCreatedDialog}>
               {t(($) => $.tokens.created_dialog.done)}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!revealedToken} onOpenChange={(v) => { if (!v) closeRevealDialog(); }}>
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>{t(($) => $.tokens.reveal_dialog.title, { name: revealedName })}</DialogTitle>
+          </DialogHeader>
+          <Alert>
+            <Info />
+            <AlertDescription>
+              {t(($) => $.tokens.reveal_dialog.warning)}
+            </AlertDescription>
+          </Alert>
+          <div className="flex min-w-0 items-center gap-2">
+            <code className="min-w-0 flex-1 truncate rounded-md border bg-muted/50 px-3 py-2 text-body select-all">
+              {revealedToken}
+            </code>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={handleCopyRevealedToken}
+                    aria-label={t(($) => $.tokens.reveal_dialog.copy_tooltip)}
+                  >
+                    {revealCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                  </Button>
+                }
+              />
+              <TooltipContent>{t(($) => $.tokens.reveal_dialog.copy_tooltip)}</TooltipContent>
+            </Tooltip>
+          </div>
+          <DialogFooter>
+            <Button onClick={closeRevealDialog}>
+              {t(($) => $.tokens.reveal_dialog.done)}
             </Button>
           </DialogFooter>
         </DialogContent>

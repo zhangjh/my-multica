@@ -671,6 +671,9 @@
     "toast_create_failed": "Failed to create token",
     "toast_revoked": "Token revoked",
     "toast_revoke_failed": "Failed to revoke token",
+    "toast_reveal_failed": "Failed to show token",
+    "reveal_aria": "Show token for {{name}}",
+    "reveal_tooltip": "Show token",
     "metadata_prefix": "{{prefix}}... · Created {{created}} · {{lastUsed}}",
     "last_used_with_date": "Last used {{date}}",
     "last_used_never": "Never used",
@@ -685,13 +688,19 @@
     },
     "created_dialog": {
       "title": "Personal access token created",
-      "warning_prefix": "Your new personal access token has been created. For security reasons, it is ",
-      "warning_emphasis": "displayed only once",
-      "warning_suffix": " — store it securely and never share it. A lost token cannot be recovered; revoke it and create a new one instead.",
+      "warning_prefix": "Store it securely and never share it. If you ever misplace it, you can ",
+      "warning_emphasis": "re-show it anytime",
+      "warning_suffix": " from the API Tokens list.",
       "confirm_stored": "I have securely stored this token.",
       "copy_tooltip": "Copy token",
       "cli_hint": "Sign in to the CLI with:",
       "copy_command_tooltip": "Copy command",
+      "done": "Done"
+    },
+    "reveal_dialog": {
+      "title": "{{name}} API token",
+      "warning": "Treat this token like a password — never share it with anyone.",
+      "copy_tooltip": "Copy token",
       "done": "Done"
     },
     "purpose": "Authenticate the CLI and API.",

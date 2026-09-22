@@ -570,6 +570,10 @@ export interface CreatePersonalAccessTokenResponse extends PersonalAccessToken {
   token: string;
 }
 
+export interface RevealPersonalAccessTokenResponse {
+  token: string;
+}
+
 // Pagination
 export interface PaginationParams {
   limit?: number;

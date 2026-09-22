@@ -79,6 +79,17 @@ func (h *Handler) CreatePersonalAccessToken(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Store an encrypted copy of the raw token so the same token can be
+	// re-displayed later from Settings -> API Tokens (see
+	// RevealPersonalAccessToken). Stripping the plaintext immediately means
+	// the database only ever holds the hash, the prefix, and this sealed
+	// copy.
+	tokenCipher, err := auth.EncryptPATToken(rawToken)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to secure token")
+		return
+	}
+
 	var expiresAt pgtype.Timestamptz
 	if req.ExpiresInDays != nil && *req.ExpiresInDays > 0 {
 		expiresAt = pgtype.Timestamptz{
@@ -98,6 +109,7 @@ func (h *Handler) CreatePersonalAccessToken(w http.ResponseWriter, r *http.Reque
 		TokenHash:   auth.HashToken(rawToken),
 		TokenPrefix: prefix,
 		ExpiresAt:   expiresAt,
+		TokenCipher: tokenCipher,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create token")
@@ -250,6 +262,59 @@ func (h *Handler) RenewCurrentPersonalAccessToken(w http.ResponseWriter, r *http
 	default:
 		writeError(w, http.StatusInternalServerError, "failed to renew token")
 	}
+}
+
+// RevealPATResponse is the body returned by RevealPersonalAccessToken.
+type RevealPATResponse struct {
+	Token string `json:"token"`
+}
+
+// RevealPersonalAccessToken re-displays the raw token of a PAT the caller
+// owns. The server only ever stored a hash plus an encrypted copy of the raw
+// token (token_cipher), so this endpoint decrypts that copy and returns it —
+// it does not mint a new token.
+//
+// Tokens created before this feature existed have an empty token_cipher and
+// cannot be revealed; the endpoint reports 404 for them so the UI can tell
+// "not yours / already revoked" apart from "minted before reveal was
+// supported".
+func (h *Handler) RevealPersonalAccessToken(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+
+	id := chi.URLParam(r, "id")
+	idUUID, ok := parseUUIDOrBadRequest(w, id, "token id")
+	if !ok {
+		return
+	}
+
+	row, err := h.Queries.GetPersonalAccessTokenForReveal(r.Context(), db.GetPersonalAccessTokenForRevealParams{
+		ID:     idUUID,
+		UserID: parseUUID(userID),
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "token not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to look up token")
+		return
+	}
+
+	if row.TokenCipher == "" {
+		writeError(w, http.StatusNotFound, "this token was created before token reveal was supported; revoke it and create a new one to view it again")
+		return
+	}
+
+	raw, err := auth.DecryptPATToken(row.TokenCipher)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to reveal token")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, RevealPATResponse{Token: raw})
 }
 
 func (h *Handler) RevokePersonalAccessToken(w http.ResponseWriter, r *http.Request) {

@@ -119,6 +119,11 @@ Workspace-scoped queries filter by `workspace_id`; membership gates access and `
 - Default tests must not resolve or execute user-installed agent CLIs; pass test-created fake or missing executable paths. New default agent commands go in `scripts/agent-cli-command-names.txt`.
 - Only run real-agent smoke tests when explicitly authorized. Gate them behind `agentintegration` and check `MULTICA_RUN_REAL_AGENT_SMOKE=1` before executable lookup/account access. Run the specific test: `(cd server && MULTICA_RUN_REAL_AGENT_SMOKE=1 go test -tags=agentintegration ./pkg/agent -run '<test-name>' -count=1 -v)`.
 
+## Deployment Rules (self-host)
+
+- This deployment's web frontend (`apps/web`) is served from Cloudflare Workers; the backend runs locally via docker compose. Deploying the web is a push-to-trunk job: `.github/workflows/deploy-web.yml` runs `opennextjs-cloudflare build` and `wrangler deploy` on GitHub Actions. Do NOT build or deploy the web locally.
+- Never run `next build`, `opennextjs-cloudflare build`, `wrangler`/`build:cf`/`deploy:cf`, or a fresh `pnpm install` of the web toolchain on the self-host VPS: those steps are memory-hungry and have OOM-killed this host before (see `scripts/deploy-web-cloudflare.sh`). Light verification (`tsc --noEmit`, targeted vitest) is acceptable if kept small.
+
 ## Change and Delivery Rules
 
 - Keep changes scoped; reuse existing patterns. Code comments are English.

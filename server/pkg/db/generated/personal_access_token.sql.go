@@ -12,9 +12,9 @@ import (
 )
 
 const createPersonalAccessToken = `-- name: CreatePersonalAccessToken :one
-INSERT INTO personal_access_token (user_id, name, token_hash, token_prefix, expires_at)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, user_id, name, token_hash, token_prefix, expires_at, last_used_at, revoked, created_at
+INSERT INTO personal_access_token (user_id, name, token_hash, token_prefix, expires_at, token_cipher)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, user_id, name, token_hash, token_prefix, expires_at, last_used_at, revoked, created_at, token_cipher
 `
 
 type CreatePersonalAccessTokenParams struct {
@@ -23,6 +23,7 @@ type CreatePersonalAccessTokenParams struct {
 	TokenHash   string             `json:"token_hash"`
 	TokenPrefix string             `json:"token_prefix"`
 	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	TokenCipher string             `json:"token_cipher"`
 }
 
 func (q *Queries) CreatePersonalAccessToken(ctx context.Context, arg CreatePersonalAccessTokenParams) (PersonalAccessToken, error) {
@@ -32,6 +33,7 @@ func (q *Queries) CreatePersonalAccessToken(ctx context.Context, arg CreatePerso
 		arg.TokenHash,
 		arg.TokenPrefix,
 		arg.ExpiresAt,
+		arg.TokenCipher,
 	)
 	var i PersonalAccessToken
 	err := row.Scan(
@@ -44,6 +46,7 @@ func (q *Queries) CreatePersonalAccessToken(ctx context.Context, arg CreatePerso
 		&i.LastUsedAt,
 		&i.Revoked,
 		&i.CreatedAt,
+		&i.TokenCipher,
 	)
 	return i, err
 }
@@ -84,7 +87,7 @@ func (q *Queries) ExtendPersonalAccessTokenExpiry(ctx context.Context, arg Exten
 }
 
 const getPersonalAccessTokenByHash = `-- name: GetPersonalAccessTokenByHash :one
-SELECT id, user_id, name, token_hash, token_prefix, expires_at, last_used_at, revoked, created_at FROM personal_access_token
+SELECT id, user_id, name, token_hash, token_prefix, expires_at, last_used_at, revoked, created_at, token_cipher FROM personal_access_token
 WHERE token_hash = $1
   AND revoked = FALSE
   AND (expires_at IS NULL OR expires_at > now())
@@ -103,12 +106,36 @@ func (q *Queries) GetPersonalAccessTokenByHash(ctx context.Context, tokenHash st
 		&i.LastUsedAt,
 		&i.Revoked,
 		&i.CreatedAt,
+		&i.TokenCipher,
 	)
 	return i, err
 }
 
+const getPersonalAccessTokenForReveal = `-- name: GetPersonalAccessTokenForReveal :one
+SELECT id, name, token_cipher FROM personal_access_token
+WHERE id = $1 AND user_id = $2 AND revoked = FALSE
+`
+
+type GetPersonalAccessTokenForRevealParams struct {
+	ID     pgtype.UUID `json:"id"`
+	UserID pgtype.UUID `json:"user_id"`
+}
+
+type GetPersonalAccessTokenForRevealRow struct {
+	ID          pgtype.UUID `json:"id"`
+	Name        string      `json:"name"`
+	TokenCipher string      `json:"token_cipher"`
+}
+
+func (q *Queries) GetPersonalAccessTokenForReveal(ctx context.Context, arg GetPersonalAccessTokenForRevealParams) (GetPersonalAccessTokenForRevealRow, error) {
+	row := q.db.QueryRow(ctx, getPersonalAccessTokenForReveal, arg.ID, arg.UserID)
+	var i GetPersonalAccessTokenForRevealRow
+	err := row.Scan(&i.ID, &i.Name, &i.TokenCipher)
+	return i, err
+}
+
 const listPersonalAccessTokensByUser = `-- name: ListPersonalAccessTokensByUser :many
-SELECT id, user_id, name, token_hash, token_prefix, expires_at, last_used_at, revoked, created_at FROM personal_access_token
+SELECT id, user_id, name, token_hash, token_prefix, expires_at, last_used_at, revoked, created_at, token_cipher FROM personal_access_token
 WHERE user_id = $1
   AND revoked = FALSE
 ORDER BY created_at DESC
@@ -133,6 +160,7 @@ func (q *Queries) ListPersonalAccessTokensByUser(ctx context.Context, userID pgt
 			&i.LastUsedAt,
 			&i.Revoked,
 			&i.CreatedAt,
+			&i.TokenCipher,
 		); err != nil {
 			return nil, err
 		}
