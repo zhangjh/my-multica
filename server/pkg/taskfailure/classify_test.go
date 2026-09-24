@@ -70,13 +70,20 @@ func TestClassifyRules(t *testing.T) {
 		// 4. Provider quota / billing.
 		{"402", "API Error: 402 Payment Required", ReasonAgentProviderQuotaLimit},
 		{"insufficient_balance", `{"error":{"code":"insufficient_balance"}}`, ReasonAgentProviderQuotaLimit},
+		{"insufficient_quota", `{"error":{"code":"insufficient_quota","message":"Current usage is at 100%. Please check your plan and billing details."}}`, ReasonAgentProviderQuotaLimit},
 		{"balance is too low", "balance is too low to make this request", ReasonAgentProviderQuotaLimit},
+		{"your current quota", "You exceeded your current quota, please check your plan and billing details.", ReasonAgentProviderQuotaLimit},
 		{"monthly usage limit", "You've hit your org's monthly usage limit", ReasonAgentProviderQuotaLimit},
 		{"usage limit", "Account exceeded the daily usage limit", ReasonAgentProviderQuotaLimit},
 		{"hit your limit ascii", "you've hit your limit; upgrade to continue", ReasonAgentProviderQuotaLimit},
 		{"hit your limit curly", "you\u2019ve hit your limit", ReasonAgentProviderQuotaLimit},
 		{"credits", "Your account has 0 credits remaining", ReasonAgentProviderQuotaLimit},
 		{"quota", "quota exceeded for project foo", ReasonAgentProviderQuotaLimit},
+		// DANTE-23: the prefix the OpenCode quota preflight puts on its
+		// fast-fail reaches the classifier with the provider message after it;
+		// both must land in the quota bucket.
+		{"opencode quota prefix", "opencode quota limit: insufficient_quota", ReasonAgentProviderQuotaLimit},
+		{"opencode quota prefix with provider text", "opencode quota limit: quota exceeded: 402 You exceeded your current quota, please check your plan and billing details.", ReasonAgentProviderQuotaLimit},
 
 		// 5. Capacity / rate limit.
 		{"429", "API Error: 429 Too Many Requests", ReasonAgentProviderCapacityOrRateLimit},
@@ -610,5 +617,53 @@ func TestClassifyKeepsDeadlineExceededAsProviderNetwork(t *testing.T) {
 
 	if got := Classify("post to provider: context deadline exceeded"); got != ReasonAgentProviderNetwork {
 		t.Errorf("Classify(provider deadline) = %q, want %q", got, ReasonAgentProviderNetwork)
+	}
+}
+
+// TestProviderQuotaLimitWitness pins the preflight used by the fast-fail scan
+// layers (DANTE-23). It must fire on the unambiguous provider rejection wordings
+// and stay silent on healthy transcript text that merely mentions quotas or
+// billing — over-killing that last set is exactly the regression the feature is
+// not allowed to introduce ("正常运行的对话行为不变").
+func TestProviderQuotaLimitWitness(t *testing.T) {
+	t.Parallel()
+
+	matched := []struct {
+		name string
+		in   string
+	}{
+		{"openai insufficient_quota code", "Error code: 402 - insufficient_quota. You exceeded your current quota, please check your plan and billing details."},
+		{"openai current quota", "You exceeded your current quota, please check your plan and billing details."},
+		{"quota exceeded", "Error: quota exceeded for current project foo"},
+		{"402 payment required", "API Error: 402 Payment Required"},
+		{"anthropic credit balance", "Error: API Error: credit balance is too low to access the Claude API"},
+		{"insufficient balance", `{"error":{"code":"insufficient_balance"}}`},
+		{"monthly usage limit", "You've hit your org's monthly usage limit"},
+		{"out of credits", "Your account is out of credits. Please add credits and retry."},
+		{"no credits remaining", "Your account has no credits remaining."},
+		{"billing with quota context", "your project has exceeded its billing quota"},
+		{"billing with suspension", "account billing has been suspended"},
+		{"case insensitive", "YOU EXCEEDED YOUR CURRENT QUOTA"},
+	}
+	for _, tc := range matched {
+		if got, ok := ProviderQuotaLimitWitness(tc.in); !ok || got == "" {
+			t.Errorf("ProviderQuotaLimitWitness(%q) = (%q, %v), want a witness", tc.name, got, ok)
+		}
+	}
+
+	unmatched := []struct {
+		name string
+		in   string
+	}{
+		{"bare quota in prose", "We allocated a quota of 10k tokens/day for the migration."},
+		{"bare billing in prose", "The plan page lists the billing options and payment methods."},
+		{"quota with context but not exceeded", "The model quota for this workspace is 200 calls per hour."},
+		{"credits near miss", "credit card on file will renew the plan"},
+		{"empty", ""},
+	}
+	for _, tc := range unmatched {
+		if got, ok := ProviderQuotaLimitWitness(tc.in); ok {
+			t.Errorf("ProviderQuotaLimitWitness(%q) = (%q, true), want no trigger", tc.name, got)
+		}
 	}
 }

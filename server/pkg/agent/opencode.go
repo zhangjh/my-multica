@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/multica-ai/multica/server/pkg/taskfailure"
 )
 
 // opencodeTerminateGraceNanos optionally overrides, in nanoseconds, how long a
@@ -23,6 +25,13 @@ import (
 // reads it. See the cancellation handler in Execute for why termination must
 // precede closing the stdout pipe (#4533).
 var opencodeTerminateGraceNanos atomic.Int64
+
+// opencodeQuotaFailurePrefix opens every run the quota preflight in
+// processEvents aborts. It must stay a prefix of the error string AND match
+// taskfailure's opencodeQuotaPrefix mirror verbatim (that classifier's rule 4
+// looks for the exact phrase) — the test TestOpencodeProcessEventsQuotaErrorFailsFast
+// pins the link, and pkg/taskfailure owns the canonical spelling.
+const opencodeQuotaFailurePrefix = "opencode quota limit"
 
 func opencodeTerminateGrace() time.Duration {
 	if n := opencodeTerminateGraceNanos.Load(); n > 0 {
@@ -337,10 +346,15 @@ func (b *opencodeBackend) Execute(ctx context.Context, prompt string, opts ExecO
 		// OpenCode exited has returned by now. The writer sends exactly once.
 		writeErr := <-writeErrCh
 
-		if runCtx.Err() == context.DeadlineExceeded {
+		// A quota/billing rejection ends the run through the SAME execution
+		// context the timeout/abort branches read — the preflight cancelled it
+		// on purpose, so its diagnosis must win over the generic cancelled
+		// classifier, or the failure loses its provider_quota_limit label and
+		// the page regresses to the misleading idle-watchdog copy (DANTE-23).
+		if scanResult.quotaWitness == "" && runCtx.Err() == context.DeadlineExceeded {
 			scanResult.status = "timeout"
 			scanResult.errMsg = fmt.Sprintf("opencode timed out after %s", timeout)
-		} else if runCtx.Err() == context.Canceled {
+		} else if scanResult.quotaWitness == "" && runCtx.Err() == context.Canceled {
 			scanResult.status = "aborted"
 			scanResult.errMsg = "execution cancelled"
 		} else if exitErr != nil && scanResult.status == "completed" {
@@ -417,10 +431,23 @@ type eventResult struct {
 	// need "this run really completed" must test this field; status defaults to
 	// "completed" and cannot carry that meaning on its own.
 	sawTerminalSignal bool
+	// quotaWitness is the provider quota/billing phrase the preflight scan
+	// caught; empty means the stream never emitted one. When set, the run is
+	// already failed with the quota diagnosis, and the execution context the
+	// timeout/abort branches read may fire from the daemon's quota kill — so
+	// the wrapper must NOT let the generic cancelled/aborted classifier
+	// overwrite it (DANTE-23).
+	quotaWitness string
 }
 
 // processEvents reads JSON lines from r, dispatches events to ch, and returns
 // the accumulated result. This is the core scanner loop, extracted for testability.
+//
+// A provider quota/billing rejection hit by the preflight inside the loop is
+// delivered to ch as a MessageError whose content carries the quota prefix, and
+// the run's accumulated result is failed with that same error text — see the
+// DANTE-23 comment at the preflight for why cancellation itself stays with the
+// daemon rather than here. (DANTE-23)
 func (b *opencodeBackend) processEvents(r io.Reader, ch chan<- Message) eventResult {
 	var output strings.Builder
 	var sessionID string
@@ -428,6 +455,7 @@ func (b *opencodeBackend) processEvents(r io.Reader, ch chan<- Message) eventRes
 	separateReasoning := opencodeSeparatesReasoning(b.cfg)
 	finalStatus := "completed"
 	var finalError string
+	var quotaWitness string
 
 	// Track step bracketing so a stream that ends mid-step is not mistaken for a
 	// clean completion. OpenCode's JSON stream has no terminal result event
@@ -485,6 +513,40 @@ func (b *opencodeBackend) processEvents(r io.Reader, ch chan<- Message) eventRes
 			// Publish it for the cancellation handler, which needs a session id
 			// to interrupt a 2.x run server-side. No-op when b has no tracker.
 			b.session.set(event.SessionID)
+		}
+
+		// Quota / billing preflight (DANTE-23). A model account that runs out
+		// of credit makes the provider reject every call; opencode surfaces the
+		// rejection as an error event (error.data.message) or, on some
+		// providers/releases, as the last text it ever emits — then goes
+		// silent. Both surfaces are scanned against the shared strong-witness
+		// list. A hit surfaces as an explicit MessageError whose content carries
+		// the quota prefix + witness: the daemon's own drain scan sees it on the
+		// one channel it unconditionally drains, sets its quota flag, and
+		// cancels the run through its normal path — fast process teardown
+		// instead of a ~10 minute idle-watchdog force-stop mislabeled
+		// "idle_watchdog". The scanner deliberately does NOT cancel its own
+		// runCtx: cancelling here would put this MessageError and
+		// drainCtx.Done() in the daemon's select simultaneously, and the
+		// random pick can win with cancel-and-no-diagnosis, throwing away the
+		// quota reason. Deliberately NOT scanning the whole raw line: tool
+		// result payloads can carry arbitrary external text that merely
+		// mentions quotas, and killing a healthy run on that is the one
+		// regression this feature must not introduce.
+		var hostText string
+		switch {
+		case event.Error != nil:
+			hostText = event.Error.Message()
+		case event.Part.Text != "":
+			hostText = event.Part.Text
+		}
+		if witness, ok := taskfailure.ProviderQuotaLimitWitness(hostText); ok {
+			quotaWitness = witness
+			finalStatus = "failed"
+			finalError = fmt.Sprintf("%s: %s", opencodeQuotaFailurePrefix, witness)
+			b.cfg.Logger.Warn("opencode provider quota/billing limit detected; aborting run", "witness", witness)
+			trySend(ch, Message{Type: MessageError, Content: finalError})
+			break
 		}
 
 		switch event.Type {
@@ -576,6 +638,7 @@ func (b *opencodeBackend) processEvents(r io.Reader, ch chan<- Message) eventRes
 		usage:             usage,
 		noTerminalSignal:  noTerminalSignal,
 		sawTerminalSignal: sawStepFinish && !noTerminalSignal,
+		quotaWitness:      quotaWitness,
 	}
 }
 

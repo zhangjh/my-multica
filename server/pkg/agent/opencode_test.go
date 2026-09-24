@@ -1174,6 +1174,175 @@ func TestOpencodeProcessEventsUsageOnlyFinalStepStaysCompleted(t *testing.T) {
 	}
 }
 
+// ── Quota / billing preflight tests (DANTE-23) ──
+//
+// A runtime whose model account is out of credit makes the provider reject the
+// run; opencode surfaces it as an error event (error.data.message) or, on some
+// providers/releases, as the last text it ever emits, then goes silent. The
+// scanner must turn either shape into an immediate "failed" whose error text
+// carries the "opencode quota limit" prefix (which taskfailure routes to
+// provider_quota_limit) and a MessageError the daemon's own drain scan can act
+// on — instead of leaving the run to a ~10 minute idle-watchdog force-stop
+// mislabeled "idle_watchdog".
+
+func TestOpencodeProcessEventsQuotaErrorFailsFast(t *testing.T) {
+	t.Parallel()
+
+	b := &opencodeBackend{cfg: Config{Logger: slog.Default()}}
+	ch := make(chan Message, 256)
+
+	lines := strings.Join([]string{
+		`{"type":"step_start","timestamp":1000,"sessionID":"ses_quota","part":{"type":"step-start"}}`,
+		`{"type":"error","timestamp":1001,"sessionID":"ses_quota","error":{"name":"Error","data":{"message":"insufficient_quota"}}}`,
+		`{"type":"step_finish","timestamp":1002,"sessionID":"ses_quota","part":{"type":"step-finish"}}`,
+	}, "\n")
+
+	result := b.processEvents(strings.NewReader(lines), ch)
+
+	if result.status != "failed" {
+		t.Errorf("status: got %q, want %q", result.status, "failed")
+	}
+	if !strings.HasPrefix(result.errMsg, opencodeQuotaFailurePrefix) {
+		t.Errorf("errMsg: got %q, want it to start with %q", result.errMsg, opencodeQuotaFailurePrefix)
+	}
+	if result.quotaWitness == "" {
+		t.Error("quotaWitness: got empty, want the matched witness recorded")
+	}
+
+	close(ch)
+	var quotaErrMsg string
+	for m := range ch {
+		if m.Type == MessageError {
+			quotaErrMsg = m.Content
+		}
+	}
+	if !strings.HasPrefix(quotaErrMsg, opencodeQuotaFailurePrefix) {
+		t.Errorf("MessageError content: got %q, want it to start with %q so the daemon's drain scan can detect it", quotaErrMsg, opencodeQuotaFailurePrefix)
+	}
+}
+
+func TestOpencodeProcessEventsQuotaTextEventFailsFast(t *testing.T) {
+	t.Parallel()
+
+	b := &opencodeBackend{cfg: Config{Logger: slog.Default()}}
+	ch := make(chan Message, 256)
+
+	// Some providers/releases surface the rejection as plain text instead of an
+	// error event — the last thing the model says before the stream goes silent.
+	lines := strings.Join([]string{
+		`{"type":"step_start","timestamp":1000,"sessionID":"ses_quota","part":{"type":"step-start"}}`,
+		`{"type":"text","timestamp":1001,"sessionID":"ses_quota","part":{"type":"text","text":"You exceeded your current quota, please check your plan and billing details."}}`,
+	}, "\n")
+
+	result := b.processEvents(strings.NewReader(lines), ch)
+
+	if result.status != "failed" {
+		t.Errorf("status: got %q, want %q", result.status, "failed")
+	}
+	if !strings.HasPrefix(result.errMsg, opencodeQuotaFailurePrefix) {
+		t.Errorf("errMsg: got %q, want it to start with %q", result.errMsg, opencodeQuotaFailurePrefix)
+	}
+
+	close(ch)
+	var quotaErrMsg string
+	for m := range ch {
+		if m.Type == MessageError {
+			quotaErrMsg = m.Content
+		}
+	}
+	if !strings.HasPrefix(quotaErrMsg, opencodeQuotaFailurePrefix) {
+		t.Errorf("MessageError content: got %q, want it to start with %q", quotaErrMsg, opencodeQuotaFailurePrefix)
+	}
+}
+
+func TestOpencodeProcessEventsQuotaBareMentionStaysHealthy(t *testing.T) {
+	t.Parallel()
+
+	b := &opencodeBackend{cfg: Config{Logger: slog.Default()}}
+	ch := make(chan Message, 256)
+
+	// The preflight must NOT kill a healthy run on loose prose: assistant text
+	// or tool results can legitimately discuss quotas, credit, or billing.
+	lines := strings.Join([]string{
+		`{"type":"step_start","timestamp":1000,"sessionID":"ses_ok","part":{"type":"step-start"}}`,
+		`{"type":"text","timestamp":1001,"sessionID":"ses_ok","part":{"type":"text","text":"Let me check the team quota usage report before continuing."}}`,
+		`{"type":"tool_use","timestamp":1002,"sessionID":"ses_ok","part":{"type":"tool","tool":"read","callID":"call_1","metadata":{"providerExecuted":true},"state":{"status":"completed","input":{"filePath":"quota.md"},"output":"quota: 40% used, credits remaining, next billing cycle on the 1st"}}}`,
+		`{"type":"text","timestamp":1003,"sessionID":"ses_ok","part":{"type":"text","text":"Done."}}`,
+		`{"type":"step_finish","timestamp":1004,"sessionID":"ses_ok","part":{"type":"step-finish","reason":"stop"}}`,
+	}, "\n")
+
+	result := b.processEvents(strings.NewReader(lines), ch)
+
+	if result.status != "completed" {
+		t.Errorf("status: got %q, want %q (loose quota/billing mentions are not a rejection)", result.status, "completed")
+	}
+	if result.errMsg != "" {
+		t.Errorf("errMsg: got %q, want empty", result.errMsg)
+	}
+
+	close(ch)
+	for m := range ch {
+		if m.Type == MessageError {
+			t.Errorf("emitted an unexpected MessageError: %+v", m)
+		}
+	}
+}
+
+// fakeOpencodeQuotaScript impersonates an `opencode run` whose provider
+// account is out of credit: it emits the rejected error event and then exits
+// nonzero — the shape the daemon's quota-triggered cancellation produces once
+// it is wired up.
+func fakeOpencodeQuotaScript() string {
+	return `#!/bin/sh
+cat > /dev/null
+printf '{"type":"step_start","timestamp":1,"sessionID":"ses_fake","part":{"type":"step-start"}}\n'
+printf '{"type":"error","timestamp":2,"sessionID":"ses_fake","error":{"name":"Error","data":{"message":"insufficient_quota"}}}\n'
+exit 1
+`
+}
+
+// TestOpencodeBackendFailsFastOnProviderQuota proves the fail-fast over the
+// full Execute path: the scanner diagnosis must survive to Result.Error with
+// the quota prefix, and the run must be reported failed rather than hanging
+// until the daemon's idle watchdog.
+func TestOpencodeBackendFailsFastOnProviderQuota(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	fakePath := filepath.Join(tempDir, "opencode")
+	writeTestExecutable(t, fakePath, []byte(fakeOpencodeQuotaScript()))
+
+	backend, err := New("opencode", Config{
+		ExecutablePath: fakePath,
+		Logger:         slog.Default(),
+	})
+	if err != nil {
+		t.Fatalf("new opencode backend: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	session, err := backend.Execute(ctx, "prompt-ignored", ExecOptions{
+		Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	go func() {
+		for range session.Messages {
+		}
+	}()
+	result := <-session.Result
+
+	if result.Status != "failed" {
+		t.Fatalf("result status = %q, error = %q; want failed", result.Status, result.Error)
+	}
+	if !strings.HasPrefix(result.Error, opencodeQuotaFailurePrefix) {
+		t.Errorf("result error = %q, want it to start with %q", result.Error, opencodeQuotaFailurePrefix)
+	}
+}
+
 // ── Windows native-binary resolution tests ──
 
 // fakeStat returns a statFn that reports any path in `present` as existing
