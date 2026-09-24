@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$HOME/multica"
-PGRUN="$HOME/multica-data/pgdata"
+ROOT="${MULTICA_ROOT:-$HOME/multica}"
+PGRUN="${MULTICA_PGDATA:-$HOME/multica-data/pgdata}"
 LOG="$HOME/multica-data/logs"
 MULTICA_BIN="$ROOT/server/bin"
 MARKER="$LOG/deployed-commit"
 CLI_DEST="$HOME/.local/bin/multica"
+PGPORT="${MULTICA_PGPORT:-5432}"
 
 export PATH="$HOME/.local/bin:$HOME/apps/multica-pg/bin:$HOME/go/go/bin:$PATH"
 node_bin=""
@@ -19,11 +20,34 @@ export GOTOOLCHAIN=auto
 
 mkdir -p "$LOG"
 
-if ! pg_ctl -D "$PGRUN" status >/dev/null 2>&1; then
-  echo "[postgres] starting on 5432"
-  pg_ctl -D "$PGRUN" -l "$LOG/postgres.log" -o "-p 5432" start
+postgres_up() {
+  if command -v pg_isready >/dev/null 2>&1; then
+    pg_isready -q -h localhost -p "$PGPORT" >/dev/null 2>&1 && return 0
+  fi
+  command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":$PGPORT " && return 0
+  return 1
+}
+
+resolve_pgctl() {
+  PGCTL="${MULTICA_PG_CTL:-}"
+  [ -n "$PGCTL" ] && [ -x "$PGCTL" ] && return 0
+  PGCTL="$(command -v pg_ctl 2>/dev/null || true)"
+  [ -n "$PGCTL" ] && return 0
+  for cand in "$HOME/apps/multica-pg/bin/pg_ctl" "$HOME/.local/bin/pg_ctl" /usr/lib/postgresql/*/bin/pg_ctl /usr/local/pgsql/bin/pg_ctl; do
+    if [ -x "$cand" ]; then PGCTL="$cand"; return 0; fi
+  done
+  return 1
+}
+
+if postgres_up; then
+  echo "[postgres] already running on :$PGPORT"
+elif resolve_pgctl; then
+  echo "[postgres] starting on :$PGPORT"
+  "$PGCTL" -D "$PGRUN" -l "$LOG/postgres.log" -o "-p $PGPORT" start
 else
-  echo "[postgres] already running"
+  echo "[postgres] nothing on :$PGPORT and no pg_ctl found"
+  echo "          install postgres, or set MULTICA_PG_CTL=/path/to/pg_ctl (MULTICA_PGDATA for the data dir)"
+  exit 1
 fi
 
 set -a; source "$ROOT/.env"; set +a
