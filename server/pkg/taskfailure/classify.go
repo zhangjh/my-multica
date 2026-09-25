@@ -135,10 +135,24 @@ func Classify(rawError string) Reason {
 
 	// 4. Quota / billing. 402 / insufficient balance / monthly usage
 	//    limit / credits exhausted.
+	//
+	//    opencodeQuotaPrefix is the stable prefix the OpenCode quota
+	//    preflight (pkg/agent/opencode.go) puts on every fast-fail it
+	//    raises; it already matches via the bare "quota" below, and is
+	//    listed explicitly so a future edit of the bucket cannot drop
+	//    the scanner's own diagnosis. "insufficient_quota" and "your
+	//    current quota" are the OpenAI-compatible wording
+	//    ("insufficient_quota" code / "You exceeded your current quota")
+	//    — also already caught by "quota", kept for the same
+	//    self-documenting reason and because the MUL-1949 SQL's %quota%
+	//    mirror already covers them.
 	case httpQuotaCodeRe.MatchString(lower),
+		strings.Contains(lower, opencodeQuotaPrefix),
 		containsAny(lower,
 			"insufficient_balance",
+			"insufficient_quota",
 			"balance is too low",
+			"your current quota",
 			"monthly usage limit",
 			"usage limit",
 			"you've hit your limit",
@@ -465,7 +479,95 @@ func isPiProviderNetworkError(lower string) bool {
 const (
 	opencodeStreamEndedPrefix = "opencode stream ended"
 	codeartsStreamEndedPrefix = "codearts stream ended"
+
+	// opencodeQuotaPrefix opens every failure the OpenCode quota preflight
+	// raises (pkg/agent/opencode.go). Same prefix contract as the two
+	// stream-ended consts: exactly one code path emits it, it is a PREFIX of
+	// the whole error, and its bare word "quota" lands the failure in the
+	// quota bucket via rule 4 regardless of what the provider's original
+	// message said afterwards.
+	opencodeQuotaPrefix = "opencode quota limit"
 )
+
+// providerQuotaLimitTriggers are the phrases that prove a provider rejected a
+// request for billing/quota reasons, strong enough to justify force-stopping a
+// live run the moment they appear (DANTE-23: replace the ~10-minute opencode
+// idle-watchdog wait for a spent model account with a fast, clearly-labelled
+// failure). This is deliberately NARROWER than the Classify quota bucket
+// (rule 4): that bucket only labels a failure that has already happened, so
+// its broad words ("quota", "credits", "usage limit", …) can stay, while a
+// witness that KILLS a healthy run must be unambiguous on its own — model
+// prose can mention quotas and billing harmlessly ("we allocated a quota of
+// 10k tokens/day") without any provider rejection behind it.
+//
+// Mirror these into the MUL-1949 offline backfill SQL's quota bucket (the
+// existing %quota% and %usage%limit% arms already cover every one of them).
+var providerQuotaLimitTriggers = []string{
+	"insufficient_quota",  // OpenAI / OpenAI-compatible (error code)
+	"insufficient_balance", // OpenAI / Anthropic (error code)
+	"you exceeded your current quota",
+	"quota exceeded",
+	"402 payment required",
+	"credit balance is too low", // Anthropic
+	"insufficient balance",
+	"monthly usage limit",
+	"out of credits",
+	"no credits remaining",
+}
+
+// billingRejectionContext are the words that make a bare "billing" mention a
+// rejection rather than neutral prose. Alone, "billing" is far too common in a
+// healthy transcript (a model discussing payment options, docs, plans) to
+// justify killing the run; paired with one of these it is provider language
+// about a suspended / over-quota / unpayable account.
+var billingRejectionContext = []string{
+	"quota",
+	"credit",
+	"balance",
+	"exceed",
+	"insufficient",
+	"suspend",
+}
+
+// ProviderQuotaLimitWitness reports whether text carries an unambiguous
+// provider quota / billing rejection, returning the witness word matched
+// ("" and false when no trigger fires). It is the shared preflight used by
+// the two fast-fail scanning layers — the OpenCode event scanner
+// (pkg/agent/opencode.go) and the daemon's message drain
+// (internal/daemon/daemon.go) — so a quota error ends a run within moments
+// instead of after the idle watchdog window. Input is any provider/CLI error
+// or transcript text; matching is case-insensitive substring.
+func ProviderQuotaLimitWitness(text string) (string, bool) {
+	if text == "" {
+		return "", false
+	}
+	lower := strings.ToLower(text)
+	for _, trigger := range providerQuotaLimitTriggers {
+		if strings.Contains(lower, trigger) {
+			return trigger, true
+		}
+	}
+	if strings.Contains(lower, "billing") {
+		for _, ctx := range billingRejectionContext {
+			if strings.Contains(lower, ctx) {
+				return "billing", true
+			}
+		}
+	}
+	return "", false
+}
+
+// ProviderQuotaLimitError normalises a provider rejection text so Classify
+// routes it to ReasonAgentProviderQuotaLimit. Text that already carries the
+// canonical quota phrase is preserved verbatim (it classifies there already);
+// anything else is prefixed with that phrase — uniform regardless of the
+// provider's wording (DANTE-23).
+func ProviderQuotaLimitError(text string) string {
+	if strings.Contains(text, opencodeQuotaPrefix) {
+		return text
+	}
+	return opencodeQuotaPrefix + ": " + text
+}
 
 // legacyOpencodeStreamEndedReasons are the buckets a daemon predating rule 7's
 // entry lands these errors in: process_failure for the two "terminal signal"

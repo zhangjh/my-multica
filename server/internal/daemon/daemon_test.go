@@ -3953,7 +3953,92 @@ func TestExecuteAndDrain_IdleWatchdog_FiresOnInactivity(t *testing.T) {
 	}
 }
 
-// waitForAgentMessageBackend holds Execute until the wrapped backend has
+// ── Quota / billing fail-fast tests (DANTE-23) ──
+
+// quotaBackend simulates a runtime whose model account is out of credit: the
+// provider rejection arrives as a MessageError, then the backend goes silent
+// forever — the exact shape that used to hang until the idle watchdog
+// force-stopped it minutes later under an "idle_watchdog" label.
+type quotaBackend struct{}
+
+func (quotaBackend) Execute(_ context.Context, _ string, _ agent.ExecOptions) (*agent.Session, error) {
+	msgCh := make(chan agent.Message, 1)
+	resCh := make(chan agent.Result)
+	msgCh <- agent.Message{Type: agent.MessageError, Content: "insufficient_quota"}
+	// Deliberately do NOT close msgCh and never write to resCh, like
+	// idleWatchdogBackend: after the rejection the provider stops responding.
+	return &agent.Session{Messages: msgCh, Result: resCh}, nil
+}
+
+// TestExecuteAndDrain_QuotaBackendFailsFast proves the daemon's message-layer
+// scan force-stops a quota-rejected run in moments with a failed,
+// provider_quota_limit-routing result — the idle watchdog is left at a
+// minute-long default so anything approaching its window means the fast-fail
+// did not fire.
+func TestExecuteAndDrain_QuotaBackendFailsFast(t *testing.T) {
+	t.Parallel()
+
+	d := newTestDaemon(t)
+	d.cfg.AgentIdleWatchdog = time.Minute
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	start := time.Now()
+	result, _, err := d.executeAndDrain(ctx, quotaBackend{}, "p", agent.ExecOptions{}, slog.Default(), "t-quota", "", new(atomic.Int32))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != "failed" {
+		t.Fatalf("expected status=failed, got %q (err=%q)", result.Status, result.Error)
+	}
+	if taskfailure.Classify(result.Error) != taskfailure.ReasonAgentProviderQuotaLimit {
+		t.Fatalf("expected error to classify as provider_quota_limit, got %q (err=%q)", taskfailure.Classify(result.Error), result.Error)
+	}
+	if !strings.Contains(result.Error, "insufficient_quota") {
+		t.Fatalf("expected error to preserve the provider witness, got %q", result.Error)
+	}
+	// The message scan must short-circuit long before the idle window.
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("quota fail-fast took too long: %s (idle window=%s)", elapsed, d.cfg.AgentIdleWatchdog)
+	}
+}
+
+// quotaHealthyBackend emits a normal transcript into which quota/billing words
+// appear as harmless prose and as a tool result payload, then completes.
+type quotaHealthyBackend struct{}
+
+func (quotaHealthyBackend) Execute(_ context.Context, _ string, _ agent.ExecOptions) (*agent.Session, error) {
+	msgCh := make(chan agent.Message, 3)
+	resCh := make(chan agent.Result, 1)
+	msgCh <- agent.Message{Type: agent.MessageText, Content: "Let me check the quota usage report before continuing."}
+	msgCh <- agent.Message{Type: agent.MessageToolResult, Tool: "read", Output: "quota: 40% used, credits remaining, next billing cycle on the 1st"}
+	close(msgCh)
+	resCh <- agent.Result{Status: "completed", Output: "done"}
+	close(resCh)
+	return &agent.Session{Messages: msgCh, Result: resCh}, nil
+}
+
+// TestExecuteAndDrain_QuotaMentionsDoNotKillHealthyRun is the regression guard
+// for the deliberate scope of the drain scan: only error/text/thinking/log
+// content counts, so an otherwise healthy run that merely discusses quotas or
+// returns tool output mentioning them is never force-stopped.
+func TestExecuteAndDrain_QuotaMentionsDoNotKillHealthyRun(t *testing.T) {
+	t.Parallel()
+
+	d := newTestDaemon(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	result, _, err := d.executeAndDrain(ctx, quotaHealthyBackend{}, "p", agent.ExecOptions{}, slog.Default(), "t-quota-healthy", "", new(atomic.Int32))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("expected status=completed, got %q (err=%q)", result.Status, result.Error)
+	}
+}
 // processed a selected protocol message, then hands the full stream to the
 // daemon. It makes watchdog cancellation tests deterministic without changing
 // the production watchdog window or relying on child-process scheduling speed.

@@ -9439,6 +9439,16 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 	// AgentToolWatchdog budget instead of treating that silence as a hang.
 	var inFlightTools atomic.Int32
 	var idleWatchdogFired atomic.Bool
+	// quotaHit is set the first time the drain scan sees an unambiguous
+	// provider quota/billing rejection in the message stream (DANTE-23). A hit
+	// force-stops the run immediately via agentCancel() — the same cancel the
+	// idle watchdog uses — so a backend that goes silent after the rejection is
+	// torn down in moments instead of after the idle window, and the terminal
+	// classification below reports provider_quota_limit rather than a
+	// misleading idle_watchdog. quotaMsg stores the offending message content;
+	// both are written under the CAS so only the first hit is acted on.
+	var quotaHit atomic.Bool
+	var quotaMsg atomic.Value // string: the content that tripped the scan
 	// idleWatchdogThreshold records (as nanos) which silence budget actually
 	// tripped the watchdog — the idle window or the larger in-flight-tool
 	// window — so the failure message reports the real duration.
@@ -9615,6 +9625,27 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 				// can't be misattributed to backend silence.
 				observedAt := time.Now().UTC()
 				lastActivityAt.Store(observedAt.UnixNano())
+				// Quota / billing rejection scan (DANTE-23). MessageError is the
+				// primary surface — every backend funnels provider errors there
+				// (the OpenCode scanner emits one for its preflight hit) — but
+				// text/thinking/log content can carry a rejection too when a
+				// provider surfaces it as prose rather than an error. Tool
+				// results are deliberately NOT scanned: their payloads are
+				// arbitrary external text that may merely mention quotas, and
+				// killing a healthy run on that is the one regression this must
+				// not introduce. On a hit the run is force-stopped immediately;
+				// the terminal dispositions below turn it into a "failed"
+				// provider_quota_limit outcome.
+				if !quotaHit.Load() {
+					switch msg.Type {
+					case agent.MessageError, agent.MessageText, agent.MessageThinking, agent.MessageLog:
+						if witness, ok := taskfailure.ProviderQuotaLimitWitness(msg.Content); ok && quotaHit.CompareAndSwap(false, true) {
+							quotaMsg.Store(msg.Content)
+							taskLog.Warn("agent reported provider quota/billing limit; force-stopping run", "witness", witness)
+							agentCancel()
+						}
+					}
+				}
 				switch msg.Type {
 				case agent.MessageStatus:
 					// Persist the session/work_dir as soon as the backend
@@ -9840,6 +9871,17 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 				result.Error = idleWatchdogReason(time.Duration(idleWatchdogThreshold.Load()))
 			}
 		}
+		// The quota kill (agentCancel) can race a backend's own terminal send:
+		// if the drain's result wins the race, re-tag whatever the cancel path
+		// guessed as the quota diagnosis. A backend that already diagnosed quota
+		// itself keeps its (richer) text; a genuinely completed result survives
+		// untouched (DANTE-23).
+		if quotaHit.Load() && result.Status != "completed" &&
+			taskfailure.Classify(result.Error) != taskfailure.ReasonAgentProviderQuotaLimit {
+			content, _ := quotaMsg.Load().(string)
+			result.Status = "failed"
+			result.Error = taskfailure.ProviderQuotaLimitError(content)
+		}
 		return result, toolCount.Load(), nil
 	case <-drainCtx.Done():
 		// The drain loop is exiting on this same Done signal; wait for its
@@ -9847,6 +9889,18 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 		// hand back (and let runTask fail-and-broadcast) a still-flushing
 		// transcript either.
 		waitForDrain()
+		// A quota/billing hit already force-stopped this run and the drain
+		// cancel won before the backend could deliver its own result. Fail fast
+		// with the quota diagnosis (it outranks the idle watchdog, which can
+		// only have tripped after this same cancel and would be mislabeled
+		// otherwise), DANTE-23.
+		if quotaHit.Load() {
+			content, _ := quotaMsg.Load().(string)
+			return agent.Result{
+				Status: "failed",
+				Error:  taskfailure.ProviderQuotaLimitError(content),
+			}, toolCount.Load(), nil
+		}
 		// Idle watchdog cancels via agentCancel(), which propagates here as
 		// context.Canceled. Check this BEFORE the generic cancelled/timeout
 		// classifiers so a watchdog-induced stop isn't misreported as
