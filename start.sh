@@ -39,6 +39,14 @@
 # when a .next build already exists, and MULTICA_WEB=1 forces build+serve,
 # MULTICA_WEB=0 forces backend-only.
 #
+# Who runs the application process is a per-host decision:
+#   MULTICA_APP_MODE=compose  the backend is the compose `backend` service, so
+#                              Docker's restart policy owns crash recovery and
+#                              this script only drives the container
+#   MULTICA_APP_MODE=native   the backend is a host process under a pidfile
+#   MULTICA_APP_MODE=auto     compose as soon as a backend container exists
+# Put it in .env so cron, the boot unit and the self-heal timer all agree.
+#
 # Every knob is an environment variable; see "CONFIG" below.
 set -euo pipefail
 
@@ -68,6 +76,8 @@ PG_BOOTSTRAP="${MULTICA_DB_BOOTSTRAP:-0}"   # 1 = allow creating role/database
 COMPOSE_FILES=(
   "$ROOT/docker-compose.selfhost.yml"
   "$ROOT/docker-compose.selfhost.build.yml"
+  # Optional extra override; only passed to docker compose when it exists.
+  "$ROOT/docker-compose.selfhost.hostport.yml"
 )
 
 # ---------------------------------------------------------------------------
@@ -312,10 +322,28 @@ ensure_node() {
 # ---------------------------------------------------------------------------
 load_env() {
   [ -f "$ENV_FILE" ] || fail "missing $ENV_FILE — cp $ROOT/.env.example $ENV_FILE and fill it in"
+  # .env provides the defaults, the environment overrides them: an operator
+  # running `MULTICA_APP_MODE=native ./start.sh stop` must not be overruled by
+  # whatever the same key is pinned to in .env. Remember the incoming values and
+  # put them back after sourcing.
+  local -A incoming=()
+  local k
+  while IFS='=' read -r k _; do
+    case "$k" in
+      [A-Za-z_]*) ;;
+      *) continue ;;
+    esac
+    [ -n "${!k+set}" ] && incoming["$k"]="${!k}"
+  done <"$ENV_FILE"
   set -a
   # shellcheck disable=SC1090
   source "$ENV_FILE"
   set +a
+  for k in "${!incoming[@]}"; do
+    # shellcheck disable=SC2163  # the name is dynamic on purpose
+    printf -v "$k" '%s' "${incoming[$k]}"
+    export "${k?}"
+  done
   BACKEND_PORT="${BACKEND_PORT:-${API_PORT:-${SERVER_PORT:-${PORT:-8080}}}}"
   WEB_PORT="${FRONTEND_PORT:-3010}"
   DB_URL="${DATABASE_URL:-}"
@@ -329,7 +357,8 @@ load_env() {
   # so the frontend process needs to know where the backend is at build AND run
   # time. The browser keeps using the same origin (NEXT_PUBLIC_API_URL empty).
   REMOTE_API_URL="${REMOTE_API_URL:-http://127.0.0.1:$BACKEND_PORT}"
-  export REMOTE_API_URL
+  APP_MODE="$(app_mode_resolved)"
+  export REMOTE_API_URL APP_MODE
 }
 
 # ---------------------------------------------------------------------------
@@ -611,6 +640,96 @@ needs_build() {
 # ---------------------------------------------------------------------------
 # SERVICES
 # ---------------------------------------------------------------------------
+# Who owns the application process?
+#   compose  the backend runs as the compose `backend` service; Docker restarts
+#            it on exit and start.sh only drives the container
+#   native   the backend is a host process this script launched from a pidfile
+#   auto     compose as soon as a backend container exists for this project,
+#            native otherwise
+MULTICA_APP_MODE_DEFAULT="auto"
+app_mode_resolved() {
+  local want="${MULTICA_APP_MODE:-$MULTICA_APP_MODE_DEFAULT}"
+  case "$want" in
+    compose|native) printf '%s\n' "$want"; return 0 ;;
+    auto) ;;
+    *) fail "MULTICA_APP_MODE must be auto, compose or native (got '$want')" ;;
+  esac
+  if have docker && [ -n "$(compose ps -q backend 2>/dev/null)" ]; then
+    printf 'compose\n'
+  else
+    printf 'native\n'
+  fi
+}
+
+app_compose_cid() { compose ps -q backend 2>/dev/null | head -1; }
+
+# "healthy" only when a healthcheck exists; the stock backend service has none,
+# so running + an answer from /health is the real signal.
+app_compose_state() {
+  local cid; cid="$(app_compose_cid)"
+  [ -n "$cid" ] || { printf 'absent\n'; return 1; }
+  docker inspect -f '{{.State.Status}}{{if .State.Health}}/{{.State.Health.Status}}{{end}}' "$cid" 2>/dev/null ||
+    printf 'unknown\n'
+}
+
+app_compose_running() {
+  local cid; cid="$(app_compose_cid)"
+  [ -n "$cid" ] || return 1
+  [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" = "true" ]
+}
+
+app_compose_up() {
+  step "service: backend (docker compose)"
+  local cid out
+  if app_compose_running && [ "$(http_code "http://127.0.0.1:$BACKEND_PORT/health")" = "200" ]; then
+    ok "backend container already running and healthy ($(app_compose_cid | cut -c1-12))"
+    return 0
+  fi
+  if ! out="$(compose up -d backend 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    fail "docker compose up -d backend failed"
+  fi
+  printf '%s\n' "$out" | sed 's/^/    /'
+  cid="$(app_compose_cid)"
+  [ -n "$cid" ] || fail "compose reported success but no backend container exists"
+  ok "backend container $(printf '%s' "$cid" | cut -c1-12) $(app_compose_state)"
+}
+
+app_compose_stop() {
+  step "service: backend (docker compose)"
+  if [ -z "$(app_compose_cid)" ]; then
+    dim "no backend container; nothing to stop"
+    return 0
+  fi
+  compose stop backend >/dev/null 2>&1 || warn "compose stop backend failed"
+  ok "backend container stopped (postgres and the CLI daemon were left alone)"
+}
+
+app_compose_restart() {
+  step "service: backend (docker compose)"
+  compose restart backend >/dev/null 2>&1 || fail "compose restart backend failed"
+  ok "backend container restarted"
+}
+
+# Waits for the API to answer; the container itself reports running/unhealthy.
+app_compose_wait_healthy() {
+  local deadline code
+  deadline=$((SECONDS + HEALTH_TIMEOUT))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    code="$(http_code "http://127.0.0.1:$BACKEND_PORT/health")"
+    if [ "$code" = "200" ]; then
+      ok "backend /health -> 200 (container $(app_compose_state))"
+      return 0
+    fi
+    case "$(app_compose_state)" in
+      exited*|dead*|absent) warn "backend container $(app_compose_state) while waiting for /health" ;;
+    esac
+    sleep 2
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 start_backend() {
   step "service: backend"
   if svc_running backend; then
@@ -819,10 +938,15 @@ acquire_lock() {
 cmd_start() {
   acquire_lock
   mkdir -p "$LOG_DIR" "$RUN_DIR"
-  ensure_go
-  ensure_node
   load_env
   db_ensure
+  if [ "$APP_MODE" = "compose" ]; then
+    step "deploy: docker compose owns the app process (MULTICA_APP_MODE=compose)"
+    dim "image: $(compose config --images 2>/dev/null | grep -i backend | head -1 || echo 'multica-backend:dev')"
+    dim "rebuild the image with './start.sh build' when the source moved"
+  else
+  ensure_go
+  ensure_node
   if needs_build; then
     step "deploy: source changed since the last deploy ($(cat "$MARKER" 2>/dev/null || echo none) -> $(head_commit))"
     deploy
@@ -830,7 +954,12 @@ cmd_start() {
   else
     step "deploy: no source change since $(cat "$MARKER" 2>/dev/null || echo 'never'); reusing the build"
   fi
-  start_backend
+  fi
+  if [ "$APP_MODE" = "compose" ]; then
+    app_compose_up
+  else
+    start_backend
+  fi
   if web_enabled; then
     start_frontend
   else
@@ -845,7 +974,12 @@ cmd_start() {
 cmd_stop() {
   acquire_lock
   mkdir -p "$RUN_DIR"
-  stop_all
+  load_env
+  if [ "$APP_MODE" = "compose" ]; then
+    app_compose_stop
+  else
+    stop_all
+  fi
 }
 
 cmd_restart() {
@@ -855,10 +989,25 @@ cmd_restart() {
 
 cmd_build() {
   mkdir -p "$LOG_DIR" "$RUN_DIR"
-  ensure_go
-  ensure_node
   load_env
   db_ensure
+  if [ "$APP_MODE" = "compose" ]; then
+    step "build: docker image for the backend service"
+    # Keep the version metadata the Dockerfile bakes in, so the API reports
+    # the same commit the checkout is on.
+    VERSION="${VERSION:-v0.5.0-$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 0)-g$(head_commit)}"
+    COMMIT="${COMMIT:-$(head_commit)}"
+    DATE="${DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+    export VERSION COMMIT DATE
+    dim "VERSION=$VERSION COMMIT=$COMMIT"
+    compose build backend || fail "docker compose build backend failed"
+    app_compose_up
+    app_compose_wait_healthy || fail "the rebuilt image did not become healthy on :$BACKEND_PORT"
+    ok "build finished and serving"
+    return 0
+  fi
+  ensure_go
+  ensure_node
   deploy
   ok "build finished; restart to serve it: ./start.sh restart"
 }
@@ -874,7 +1023,15 @@ cmd_health() {
   local rc=0
   step "health"
   if db_report >/dev/null; then ok "database $(db_report)"; else warn "database $(db_report || true)"; rc=1; fi
-  if svc_running backend; then
+  if [ "$APP_MODE" = "compose" ]; then
+    local code; code="$(http_code "http://127.0.0.1:$BACKEND_PORT/health")"
+    if [ "$code" = "200" ]; then
+      ok "backend /health -> $code (container $(app_compose_state))"
+    else
+      warn "backend /health -> $code (container $(app_compose_state 2>/dev/null || echo absent))"
+      rc=1
+    fi
+  elif svc_running backend; then
     local code; code="$(http_code "http://127.0.0.1:$BACKEND_PORT/health")"
     if [ "$code" = "200" ]; then ok "backend /health -> $code"; else warn "backend /health -> $code"; rc=1; fi
   else
@@ -902,7 +1059,24 @@ cmd_ensure() {
   load_env
   local fixed=0
 
-  if svc_running backend && [ "$(http_code "http://127.0.0.1:$BACKEND_PORT/health")" = "200" ]; then
+  if [ "$APP_MODE" = "compose" ]; then
+    # Docker restarts the container when the process exits; this covers the
+    # failure mode it cannot see — a container that is up but no longer
+    # answering, e.g. wedged on the database.
+    if [ "$(http_code "http://127.0.0.1:$BACKEND_PORT/health")" = "200" ]; then
+      dim "backend: container $(app_compose_state) answering on 127.0.0.1:$BACKEND_PORT"
+    elif app_compose_running; then
+      warn "backend container $(app_compose_state) is not answering /health — restarting it"
+      app_compose_restart
+      app_compose_wait_healthy || fail "backend did not answer /health after a restart"
+      fixed=1
+    else
+      warn "backend container is not running — starting it"
+      app_compose_up
+      app_compose_wait_healthy || fail "backend did not answer /health after start"
+      fixed=1
+    fi
+  elif svc_running backend && [ "$(http_code "http://127.0.0.1:$BACKEND_PORT/health")" = "200" ]; then
     dim "backend: up (pid $(svc_pid backend)) on 127.0.0.1:$BACKEND_PORT"
   elif [ "$(http_code "http://127.0.0.1:$BACKEND_PORT/health")" = "200" ]; then
     # Something this script never started (a recreated compose backend, most
@@ -967,7 +1141,12 @@ cmd_status() {
   for entry in "backend:${BACKEND_PORT:-8080}:/health" "frontend:${WEB_PORT:-3010}:/"; do
     name="${entry%%:*}"; entry="${entry#*:}"; port="${entry%%:*}"; path="${entry#*:}"
     pid="$(svc_pid "$name" 2>/dev/null || true)"
-    if svc_running "$name"; then
+    if [ "$name" = backend ] && [ "$APP_MODE" = "compose" ]; then
+      local bstate bhttp
+      bstate="$(app_compose_state 2>/dev/null || echo absent)"
+      bhttp="$(http_code "http://127.0.0.1:$port$path")"
+      info "$(printf '%-9s' "$name") container $bstate  127.0.0.1:$port  http $bhttp  [$(app_compose_cid | cut -c1-12)]"
+    elif svc_running "$name"; then
       info "$(printf '%-9s' "$name") pid $pid  127.0.0.1:$port  http $(http_code "http://127.0.0.1:$port$path")"
     elif [ "$name" = frontend ] && ! web_enabled; then
       info "$(printf '%-9s' "$name") not deployed here (MULTICA_WEB=${MULTICA_WEB:-auto})"
