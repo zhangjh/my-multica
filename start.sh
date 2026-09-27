@@ -464,8 +464,18 @@ launch() {
   mkdir -p "$LOG_DIR" "$RUN_DIR"
   ( cd "$dir" && setsid bash -c 'printf "%s\n" "$$" >"$1"; shift; exec "$@"' \
       _ "$RUN_DIR/$name.pid" "$@" >>"$LOG_DIR/$name.log" 2>&1 </dev/null & )
-  sleep 0.4
   printf '%s\n' "$pattern" >"$RUN_DIR/$name.cmd"
+  # The child writes its own pid, so wait for that instead of guessing, and
+  # fail loudly when the process dies during startup (bad flag, port taken...).
+  local _
+  for _ in $(seq 1 50); do
+    [ -s "$RUN_DIR/$name.pid" ] && break
+    sleep 0.1
+  done
+  [ -s "$RUN_DIR/$name.pid" ] || { warn "$name: no pid appeared in $RUN_DIR/$name.pid"; return 1; }
+  sleep 0.3
+  pid_alive "$(cat "$RUN_DIR/$name.pid")" || { dump_log "$name"; return 1; }
+  return 0
 }
 
 pidfile_owned() {
@@ -484,13 +494,19 @@ svc_running() {
   pid_alive "$pid" && pidfile_owned "$1" "$pid"
 }
 
+# Waits for a URL to answer, but only while the process we launched is still
+# alive: without that check a stale listener on the same port can make a
+# freshly started (and dying) service look healthy.
 wait_svc_http() {
   local name=$1 url=$2 want=$3 deadline code
   deadline=$((SECONDS + HEALTH_TIMEOUT))
   while [ "$SECONDS" -lt "$deadline" ]; do
+    if ! svc_running "$name"; then
+      warn "$name exited while waiting for $url"
+      return 1
+    fi
     code="$(http_code "$url")"
     case ",$want," in *",$code,"*) ok "$name answers $code at $url"; return 0 ;; esac
-    svc_running "$name" || { sleep 1; continue; }
     sleep 2
   done
   return 1
@@ -582,11 +598,20 @@ needs_build() {
 # ---------------------------------------------------------------------------
 start_backend() {
   step "service: backend"
+  if svc_running backend; then
+    if [ "$(http_code "http://127.0.0.1:$BACKEND_PORT/health")" = "200" ]; then
+      ok "backend already running and healthy (pid $(svc_pid backend)) — kept"
+      return 0
+    fi
+    warn "backend is running but not answering /health; restarting it"
+    stop_service backend
+  fi
   assert_port_free "$BACKEND_PORT" backend
   # LOCAL_UPLOAD_DIR and friends are relative in .env, so the server has to run
   # from the checkout root; the uploads dir also has to exist and be writable.
   mkdir -p "$ROOT/data/uploads"
-  ( cd "$ROOT" && launch backend "$ROOT" "$SERVER_BIN/server" "$SERVER_BIN/server" )
+  ( cd "$ROOT" && launch backend "$ROOT" "$SERVER_BIN/server" "$SERVER_BIN/server" ) ||
+    fail "backend process did not stay up — see $LOG_DIR/backend.log"
   local pid; pid="$(svc_pid backend)"
   if ! wait_svc_http backend "http://127.0.0.1:$BACKEND_PORT/health" "200"; then
     dump_log backend
@@ -602,10 +627,20 @@ start_backend() {
 
 start_frontend() {
   step "service: frontend (Next.js)"
+  if svc_running frontend; then
+    case "$(http_code "http://127.0.0.1:$WEB_PORT/")" in
+      200|301|302|307|401|403)
+        ok "frontend already running (pid $(svc_pid frontend)) — kept"
+        return 0 ;;
+    esac
+    warn "frontend is running but not answering; restarting it"
+    stop_service frontend
+  fi
   assert_port_free "$WEB_PORT" frontend
   [ -d "$WEB_DIR/.next" ] || fail "no .next build; run './start.sh build' first"
   ( cd "$WEB_DIR" && PORT="$WEB_PORT" HOSTNAME=127.0.0.1 REMOTE_API_URL="$REMOTE_API_URL" \
-      launch frontend "$WEB_DIR" "next start" "$PNPM" exec next start -p "$WEB_PORT" )
+      launch frontend "$WEB_DIR" "next start" "$PNPM" exec next start -p "$WEB_PORT" ) ||
+    fail "frontend process did not stay up — see $LOG_DIR/frontend.log"
   local pid; pid="$(svc_pid frontend)"
   if ! wait_svc_http frontend "http://127.0.0.1:$WEB_PORT/" "200,301,302,307,401,403"; then
     dump_log frontend
@@ -615,25 +650,45 @@ start_frontend() {
   ok "frontend pid $pid on 127.0.0.1:$WEB_PORT"
 }
 
-nginx_reload() {
-  step "service: nginx"
-  local bin=""
+# System nginx keeps its TLS keys root-only, so both `nginx -t` and the reload
+# need privileges. Use sudo only when a plain invocation cannot work, and only
+# if it is available without a password prompt (an interactive prompt inside a
+# deploy script would hang it).
+NGINX=""
+resolve_nginx_cmd() {
+  local bin cand
   for cand in /usr/sbin/nginx /usr/local/nginx/sbin/nginx /usr/local/sbin/nginx; do
     [ -x "$cand" ] && { bin="$cand"; break; }
   done
-  if [ -z "$bin" ]; then
-    warn "nginx not found; skipping reverse proxy. The app is still reachable on 127.0.0.1:$WEB_PORT"
+  [ -n "$bin" ] || return 1
+  if [ "$(id -u)" = "0" ] || "$bin" -t >/dev/null 2>&1; then
+    NGINX="$bin"
+    return 0
+  fi
+  if have sudo && sudo -n true 2>/dev/null; then
+    NGINX="sudo -n $bin"
+    return 0
+  fi
+  return 1
+}
+
+nginx_reload() {
+  step "service: nginx"
+  if ! resolve_nginx_cmd; then
+    warn "nginx not found (or its keys are unreadable without sudo); skipping the reverse
+       proxy. The API is still reachable on 127.0.0.1:${BACKEND_PORT:-8080}"
     return 0
   fi
   if [ "${MULTICA_SKIP_NGINX:-}" = "1" ]; then
     dim "MULTICA_SKIP_NGINX=1 -> not touching nginx"
     return 0
   fi
-  "$bin" -t >/dev/null 2>&1 || fail "nginx config test failed; fix it or re-run with MULTICA_SKIP_NGINX=1"
+  dim "using: $NGINX -t"
+  $NGINX -t >/dev/null 2>&1 || fail "nginx config test failed; fix it or re-run with MULTICA_SKIP_NGINX=1"
   if pgrep -x nginx >/dev/null 2>&1; then
-    if "$bin" -s reload; then ok "nginx reloaded"; else warn "nginx reload failed"; fi
+    if $NGINX -s reload; then ok "nginx reloaded"; else warn "nginx reload failed"; fi
   else
-    if "$bin"; then ok "nginx started"; else warn "nginx failed to start"; fi
+    if $NGINX; then ok "nginx started"; else warn "nginx failed to start"; fi
   fi
   # Report on the hostnames this deployment is supposed to answer for: the API
   # origin always, the app origin only when the web runs on this host.
@@ -643,8 +698,12 @@ nginx_reload() {
     host="$(url_component "$APP_ORIGIN" host)"
     case " $hosts " in *" $host "*) ;; *) hosts="${hosts:+$hosts }$host" ;; esac
   fi
+  # Dump the config once: `nginx -T | grep -q` is a race under `set -o pipefail`
+  # (grep exits on the first match, nginx dies on SIGPIPE, the pipeline reports
+  # failure and every vhost looks missing).
+  local conf; conf="$($NGINX -T 2>/dev/null || true)"
   for host in $hosts; do
-    if "$bin" -T 2>/dev/null | grep -q "server_name.*[[:space:]]$host\(\|[[:space:];]\)"; then
+    if printf '%s' "$conf" | grep -q "server_name.*[[:space:]]$host\(\|[[:space:];]\)"; then
       ok "vhost for $host present"
     else
       warn "no nginx vhost serves $host — that URL will not work until you add one
@@ -863,8 +922,9 @@ cmd_daemon() {
 }
 
 cmd_nginx() {
+  resolve_nginx_cmd || fail "no usable nginx binary"
   case "${1:-reload}" in
-    check) /usr/sbin/nginx -t ;;
+    check) $NGINX -t ;;
     reload) nginx_reload ;;
     *) fail "usage: $0 nginx check|reload" ;;
   esac
