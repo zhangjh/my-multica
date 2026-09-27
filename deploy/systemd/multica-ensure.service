@@ -1,0 +1,21 @@
+# Self-heal check: start only what is down. Installed by
+# `./start.sh autostart on` from deploy/systemd/multica-ensure.service.
+[Unit]
+Description=Multica self-heal check (start what is down)
+Documentation=file:///home/zhangjh/multica/start.sh
+After=network-online.target multica.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=zhangjh
+Group=zhangjh
+WorkingDirectory=/home/zhangjh/multica
+Environment=HOME=/home/zhangjh
+Environment=SHELL=/bin/bash
+Environment=PATH=/home/zhangjh/.local/bin:/home/zhangjh/go/go/bin:/home/zhangjh/.nvm/versions/node/v24.14.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/zhangjh/multica/start.sh ensure
+TimeoutStartSec=300
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=multica-ensure

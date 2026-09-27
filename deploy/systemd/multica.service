@@ -1,0 +1,37 @@
+# Multica native backend, installed from deploy/systemd/multica.service
+#
+# Boot behaviour: runs the full deploy path once (build when the checkout moved,
+# apply migrations, start the backend, reload nginx, start the CLI daemon when
+# it is not already up). Type=oneshot because start.sh supervises the services
+# itself through pidfiles under $MULTICA_DATA/run — systemd only needs to know
+# whether the wiring step succeeded.
+#
+# The self-heal timer (multica-ensure.timer) restarts whatever dies later.
+[Unit]
+Description=Multica native backend (start.sh)
+Documentation=file:///home/zhangjh/multica/start.sh
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=zhangjh
+Group=zhangjh
+WorkingDirectory=/home/zhangjh/multica
+# start.sh sources ~/.nvm for node and uses sudo -n for `nginx -s reload`;
+# systemd gives neither a login shell nor a TTY, so both are provided here.
+Environment=HOME=/home/zhangjh
+Environment=SHELL=/bin/bash
+Environment=PATH=/home/zhangjh/.local/bin:/home/zhangjh/go/go/bin:/home/zhangjh/.nvm/versions/node/v24.14.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/zhangjh/multica/start.sh start
+ExecStop=/home/zhangjh/multica/start.sh stop
+# A cold boot may have to build the Go backend and the Next.js frontend.
+TimeoutStartSec=1800
+TimeoutStopSec=180
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=multica
+
+[Install]
+WantedBy=multi-user.target

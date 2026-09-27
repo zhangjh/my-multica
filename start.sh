@@ -14,12 +14,16 @@
 #   ./start.sh restart
 #   ./start.sh status
 #   ./start.sh health          # exit 0 only when everything answers
+#   ./start.sh ensure          # idempotent: start only what is down (no build,
+#                              # no migrate, no nginx) — for cron/systemd timers
 #   ./start.sh logs backend -f
 #   ./start.sh build           # force rebuild + migrate, keep serving
 #   ./start.sh migrate         # apply DB migrations only
 #   ./start.sh daemon restart
 #   ./start.sh nginx reload
 #   ./start.sh bootstrap       # first-time host prep, then build
+#   ./start.sh autostart on    # install + enable the systemd boot units
+#   ./start.sh autostart off   # disable and remove them
 #
 # Layout
 #   ROOT        checkout                        (default: this script's dir)
@@ -58,6 +62,7 @@ DB_MODE="${MULTICA_DB_MODE:-auto}"          # auto | container | native | extern
 AUTO_GO="${MULTICA_AUTO_INSTALL_GO:-1}"
 LOG_MAX_BYTES="${MULTICA_LOG_MAX_BYTES:-52428800}"   # rotate a service log past 50 MB
 HEALTH_TIMEOUT="${MULTICA_HEALTH_TIMEOUT:-90}"
+SYSTEMD_DIR="${MULTICA_SYSTEMD_DIR:-/etc/systemd/system}"
 STOP_TIMEOUT="${MULTICA_STOP_TIMEOUT:-20}"
 PG_BOOTSTRAP="${MULTICA_DB_BOOTSTRAP:-0}"   # 1 = allow creating role/database
 COMPOSE_FILES=(
@@ -165,6 +170,16 @@ db_report() {
 }
 
 # Port owner, with the process name when the kernel exposes it.
+# True when the pid still holds a listening socket on some *other* port, e.g.
+# after BACKEND_PORT was changed under a running deployment. Such a process
+# must never be killed as "unhealthy": it is serving something else.
+pid_holds_other_port() {
+  local pid="${1:-}" mine="${2:-}"
+  [ -n "$pid" ] || return 1
+  ss -ltnp 2>/dev/null | grep -F "pid=$pid," | awk '{print $4}' |
+    grep -v ":${mine}\$" | grep -q .
+}
+
 port_owner() {
   ss -ltnp 2>/dev/null | awk -v p=":$1\$" '$4 ~ p {
       pid=""; if (match($0, /pid=[0-9]+/)) pid = substr($0, RSTART+4, RLENGTH-4);
@@ -603,6 +618,12 @@ start_backend() {
       ok "backend already running and healthy (pid $(svc_pid backend)) — kept"
       return 0
     fi
+    if pid_holds_other_port "$(svc_pid backend)" "$BACKEND_PORT"; then
+      fail "the pid this script started (pid $(svc_pid backend)) is listening on a
+       different port than :$BACKEND_PORT — BACKEND_PORT changed underneath a
+       running deployment. Nothing was killed; stop it yourself or restore the
+       port in $ENV_FILE"
+    fi
     warn "backend is running but not answering /health; restarting it"
     stop_service backend
   fi
@@ -633,6 +654,10 @@ start_frontend() {
         ok "frontend already running (pid $(svc_pid frontend)) — kept"
         return 0 ;;
     esac
+    if pid_holds_other_port "$(svc_pid frontend)" "$WEB_PORT"; then
+      fail "the frontend pid $(svc_pid frontend) is listening on a port other than
+       :$WEB_PORT — nothing was killed; fix FRONTEND_PORT in $ENV_FILE"
+    fi
     warn "frontend is running but not answering; restarting it"
     stop_service frontend
   fi
@@ -781,7 +806,18 @@ stop_all() {
 # ---------------------------------------------------------------------------
 # COMMANDS
 # ---------------------------------------------------------------------------
+# A systemd timer, a deploy and an operator can all reach this script at once;
+# without a lock two runs fight over the same pidfile and port.
+acquire_lock() {
+  mkdir -p "$RUN_DIR"
+  exec 9>"$RUN_DIR/multica.lock"
+  if ! flock -w "${MULTICA_LOCK_TIMEOUT:-300}" 9; then
+    fail "another start.sh run is holding $RUN_DIR/multica.lock (waited ${MULTICA_LOCK_TIMEOUT:-300}s)"
+  fi
+}
+
 cmd_start() {
+  acquire_lock
   mkdir -p "$LOG_DIR" "$RUN_DIR"
   ensure_go
   ensure_node
@@ -807,6 +843,7 @@ cmd_start() {
 }
 
 cmd_stop() {
+  acquire_lock
   mkdir -p "$RUN_DIR"
   stop_all
 }
@@ -854,6 +891,67 @@ cmd_health() {
     dim "frontend not part of this deployment (MULTICA_WEB=${MULTICA_WEB:-auto})"
   fi
   if [ "$rc" = 0 ]; then ok "all green"; else fail "unhealthy"; fi
+}
+
+# Deliberately cheap and side-effect-free unless something is actually down:
+# this is what a systemd timer calls every couple of minutes, so it must not
+# rebuild, migrate, or reload nginx. `start` does the heavy lifting.
+cmd_ensure() {
+  acquire_lock
+  step "ensure: app and CLI daemon up (no build / no migrate / no nginx)"
+  load_env
+  local fixed=0
+
+  if svc_running backend && [ "$(http_code "http://127.0.0.1:$BACKEND_PORT/health")" = "200" ]; then
+    dim "backend: up (pid $(svc_pid backend)) on 127.0.0.1:$BACKEND_PORT"
+  elif [ "$(http_code "http://127.0.0.1:$BACKEND_PORT/health")" = "200" ]; then
+    # Something this script never started (a recreated compose backend, most
+    # likely) is answering. Never touch a foreign process: report it instead of
+    # silently adopting it, or the deployment would drift back to Docker.
+    fail "127.0.0.1:$BACKEND_PORT is served by a process this script did not start
+       (pid $(port_owner "$BACKEND_PORT") $(port_owner "$BACKEND_PORT" | xargs -r -I{} sh -c 'tr "\\0\\n" "  " </proc/{}/cmdline 2>/dev/null' 2>/dev/null))
+       Stop it (or 'docker rm -f multica-backend-1') if the native backend should own the port"
+  else
+    warn "backend is down or not answering /health — starting it"
+    db_ensure >/dev/null 2>&1 || warn "database is not reachable; the backend may fail to start"
+    start_backend
+    fixed=1
+  fi
+
+  if web_enabled; then
+    case "$(http_code "http://127.0.0.1:$WEB_PORT/")" in
+      200|301|302|307|401|403) dim "frontend: up on 127.0.0.1:$WEB_PORT" ;;
+      *)
+        warn "frontend is down — starting it"
+        start_frontend
+        fixed=1 ;;
+    esac
+  fi
+
+  if [ -x "$CLI_DEST" ]; then
+    if "$CLI_DEST" daemon status >/dev/null 2>&1; then
+      dim "daemon: running"
+    else
+      # Only reachable outside a daemon-hosted task: the CLI refuses to start a
+      # second daemon from inside one, and a task can only exist while the
+      # daemon it runs on is alive.
+      warn "CLI daemon is down — starting it"
+      if "$CLI_DEST" daemon start >>"$LOG_DIR/daemon.log" 2>&1; then
+        ok "daemon started"
+        fixed=1
+      else
+        fail "daemon start failed (see $LOG_DIR/daemon.log)"
+      fi
+    fi
+  else
+    warn "CLI not installed at $CLI_DEST — run ./start.sh start once to install it"
+  fi
+
+  if [ "$fixed" = 1 ]; then
+    ok "ensure: something was down and has been restarted"
+  else
+    dim "ensure: nothing to do, everything is already up"
+  fi
 }
 
 cmd_status() {
@@ -918,6 +1016,60 @@ cmd_daemon() {
   case "${1:-status}" in
     start|stop|restart|status) "$CLI_DEST" daemon "${1}" ;;
     *) fail "usage: $0 daemon start|stop|restart|status" ;;
+  esac
+}
+
+# Boot + self-heal wiring. The unit files live in the repo (deploy/systemd) and
+# are copied into /etc/systemd/system, so a re-clone can re-apply them.
+install_units() {
+  local src="$ROOT/deploy/systemd" unit
+  [ -d "$src" ] || fail "missing unit source directory $src"
+  have sudo || fail "sudo is required to install systemd units"
+  mkdir -p "$SYSTEMD_DIR"
+  for unit in multica.service multica-ensure.service multica-ensure.timer; do
+    [ -f "$src/$unit" ] || fail "missing $src/$unit"
+    sudo -n install -m 0644 "$src/$unit" "$SYSTEMD_DIR/$unit"
+    ok "installed $SYSTEMD_DIR/$unit"
+  done
+  sudo -n systemctl daemon-reload
+  ok "systemd units reloaded"
+}
+
+cmd_autostart() {
+  case "${1:-status}" in
+    on|install|enable)
+      step "autostart: boot units"
+      install_units
+      # enable only, never start: a boot unit that also starts now would fight
+      # the process this script is already running from.
+      sudo -n systemctl enable multica.service multica-ensure.timer >/dev/null
+      ok "enabled multica.service + multica-ensure.timer (take effect on next boot)"
+      dim "run 'sudo systemctl start multica.service' to wire it up immediately"
+      ;;
+    off|uninstall)
+      step "autostart: removing boot units"
+      have sudo || fail "sudo is required"
+      sudo -n systemctl disable --now multica-ensure.timer >/dev/null 2>&1 || true
+      sudo -n systemctl disable multica.service >/dev/null 2>&1 || true
+      sudo -n rm -f "$SYSTEMD_DIR/multica.service" "$SYSTEMD_DIR/multica-ensure.service" \
+        "$SYSTEMD_DIR/multica-ensure.timer"
+      sudo -n systemctl daemon-reload
+      ok "boot units removed (the running app was left alone)"
+      ;;
+    status|"")
+      step "autostart: boot units"
+      if have systemctl; then
+        for unit in multica.service multica-ensure.timer; do
+          printf '    %-24s enabled=%-10s active=%s\n' "$unit" \
+            "$(systemctl is-enabled "$unit" 2>/dev/null || echo no)" \
+            "$(systemctl is-active "$unit" 2>/dev/null || echo inactive)"
+        done
+      else
+        warn "no systemctl on this host; boot autostart is not available"
+      fi
+      dim "unit source: $ROOT/deploy/systemd"
+      ;;
+    *) fail "usage: $0 autostart on|off|status" ;;
   esac
 }
 
@@ -1019,6 +1171,8 @@ main() {
     logs)      cmd_logs "$@" ;;
     daemon)    cmd_daemon "$@" ;;
     nginx)     cmd_nginx "$@" ;;
+    ensure)    cmd_ensure "$@" ;;
+    autostart) cmd_autostart "$@" ;;
     help|-h|--help) usage ;;
     *) fail "unknown command '$cmd' (try '$0 help')" ;;
   esac

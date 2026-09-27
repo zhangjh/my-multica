@@ -1,0 +1,15 @@
+# Drives multica-ensure.service, which runs `./start.sh ensure`: an idempotent
+# adopt-or-start pass over the backend, the optional frontend and the CLI
+# daemon. Deliberately coarse (2 minutes) because that pass is cheap and the
+# backend's own health endpoint is the thing being policed.
+[Unit]
+Description=Run the Multica self-heal check every 2 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=15s
+Unit=multica-ensure.service
+
+[Install]
+WantedBy=timers.target
