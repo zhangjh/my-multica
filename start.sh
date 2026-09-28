@@ -584,14 +584,23 @@ web_skip_notice() {
 # ---------------------------------------------------------------------------
 head_commit() { git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown; }
 
+# Replaces the CLI the daemon runs from. The rename is deliberate: writing
+# straight over a binary the daemon is currently executing fails with ETXTBSY,
+# so stage the new one alongside it and swap the directory entry instead.
+install_cli() {
+  mkdir -p "$(dirname "$CLI_DEST")"
+  local staged="$CLI_DEST.staged.$$"
+  install -m 0755 "$SERVER_BIN/multica" "$staged" || fail "installing the CLI to $CLI_DEST failed"
+  mv -f "$staged" "$CLI_DEST"
+  ok "CLI installed at $CLI_DEST"
+}
+
 build_backend() {
   step "build: Go backend + CLI"
   have make || fail "make not found"
   ( cd "$ROOT" && make build )
   ok "binaries in $SERVER_BIN"
-  mkdir -p "$(dirname "$CLI_DEST")"
-  install -m 0755 "$SERVER_BIN/multica" "$CLI_DEST"
-  ok "CLI installed at $CLI_DEST"
+  install_cli
 }
 
 build_frontend() {
@@ -1032,6 +1041,18 @@ cmd_build() {
     app_compose_up --force-recreate
     app_compose_wait_healthy || fail "the rebuilt image did not become healthy on :$BACKEND_PORT"
     ok "build finished and serving"
+    # The daemon is a host process running $CLI_DEST, so new provider support
+    # (a new agent CLI probe, a new backend protocol) only reaches it once that
+    # binary is rebuilt — the image does not cover it. Only do this when a CLI
+    # is installed: a container-only host has no daemon to feed and should not
+    # suddenly need a Go toolchain.
+    if [ -x "$CLI_DEST" ]; then
+      ensure_go
+      build_backend
+      warn "the daemon is still on the previous CLI — reload it with './start.sh daemon restart' (interrupts in-flight tasks)"
+    else
+      dim "no CLI installed at $CLI_DEST; skipped the daemon binary build"
+    fi
     dim "note: the web frontend is not part of this image — deploy it separately (see scripts/deploy-web-cloudflare.sh)"
     return 0
   fi
