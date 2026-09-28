@@ -132,6 +132,7 @@ export const RUNTIME_PROFILE_PROTOCOL_FAMILIES = [
   "qwen",
   "qwenpaw",
   "mcode",
+  "gemini",
   "zeroclaw",
 ] as const;
 
