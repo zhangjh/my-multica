@@ -218,6 +218,10 @@ var probeAgentCLIs = func() map[string]AgentEntry {
 	if e, ok := probe("MULTICA_HERMES_PATH", "hermes", "MULTICA_HERMES_MODEL"); ok {
 		agents["hermes"] = e
 	}
+	// Gemini CLI (`gemini`) runs headlessly with -p, --yolo and stream-json.
+	if e, ok := probe("MULTICA_GEMINI_PATH", "gemini", "MULTICA_GEMINI_MODEL"); ok {
+		agents["gemini"] = e
+	}
 	if e, ok := probe("MULTICA_PI_PATH", "pi", "MULTICA_PI_MODEL"); ok {
 		agents["pi"] = e
 	}
