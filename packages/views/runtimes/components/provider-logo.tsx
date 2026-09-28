@@ -228,6 +228,18 @@ function QoderLogo({ className }: { className: string }) {
   );
 }
 
+// Gemini (Google) — official "Google Gemini" mark from Simple Icons
+// (simpleicons.org/icons/googlegemini.svg, CC0 1.0). Rendered in the
+// Simple Icons brand color (#8E75B2), matching the pattern used by the
+// other provider marks in this file.
+function GeminiLogo({ className }: { className: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="#8E75B2" className={className}>
+      <path d="M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81" />
+    </svg>
+  );
+}
+
 // Antigravity (Google) — official mark, shipped as a PNG asset next to this file.
 import antigravityLogo from "./antigravity-logo.png";
 const antigravityLogoSrc = staticAssetSrc(antigravityLogo);
@@ -417,6 +429,8 @@ export function ProviderLogo({
     case "qoder":
     case "qoderclicn":
       return <QoderLogo className={className} />;
+    case "gemini":
+      return <GeminiLogo className={className} />;
     case "antigravity":
       return <AntigravityLogo className={className} />;
     case "traecli":

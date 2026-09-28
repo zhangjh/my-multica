@@ -340,17 +340,19 @@ func TestRegisterRuntimes_SkipsProfileNotOnPath(t *testing.T) {
 
 // TestRegisterRuntimes_SkipsUnsupportedProfileFamily verifies historical
 // profiles whose protocol_family is no longer supported are not registered as
-// online runtimes even when their command still resolves locally.
+// online runtimes even when their command still resolves locally. The example
+// uses a family that is not in agent.SupportedTypes: "gemini" was restored as
+// a first-party family, so it can no longer stand in for a retired one.
 func TestRegisterRuntimes_SkipsUnsupportedProfileFamily(t *testing.T) {
 	t.Cleanup(stubAgentVersion(t))
-	stubLookPath(t, map[string]string{"gemini": "/usr/bin/gemini"})
+	stubLookPath(t, map[string]string{"legacy-gemini": "/usr/bin/legacy-gemini"})
 
 	profiles := []RuntimeProfile{{
-		ID:             "prof-gemini",
+		ID:             "prof-legacy",
 		WorkspaceID:    "ws-1",
-		DisplayName:    "Old Gemini",
-		ProtocolFamily: "gemini",
-		CommandName:    "gemini",
+		DisplayName:    "Retired Gemini",
+		ProtocolFamily: "legacy-gemini",
+		CommandName:    "legacy-gemini",
 		Enabled:        true,
 	}}
 	fx := newProfileRegisterFixture(t, profiles, http.StatusOK)
@@ -364,7 +366,7 @@ func TestRegisterRuntimes_SkipsUnsupportedProfileFamily(t *testing.T) {
 	if sig == "" {
 		t.Errorf("profileSig must still be returned for unsupported historical profiles")
 	}
-	if _, ok := d.profileLaunchSpecs["prof-gemini"]; ok {
+	if _, ok := d.profileLaunchSpecs["prof-legacy"]; ok {
 		t.Errorf("profileLaunchSpecs should not record an unsupported profile")
 	}
 	if len(fx.sentRuntimes) != 0 {
@@ -374,15 +376,15 @@ func TestRegisterRuntimes_SkipsUnsupportedProfileFamily(t *testing.T) {
 		t.Fatalf("sent failures = %+v, want one unsupported profile failure", fx.sentFailures)
 	}
 	failure := fx.sentFailures[0]
-	if failure["profile_id"] != "prof-gemini" {
-		t.Errorf("failure profile_id = %v, want prof-gemini", failure["profile_id"])
+	if failure["profile_id"] != "prof-legacy" {
+		t.Errorf("failure profile_id = %v, want prof-legacy", failure["profile_id"])
 	}
-	if failure["command_name"] != "gemini" {
-		t.Errorf("failure command_name = %v, want gemini", failure["command_name"])
+	if failure["command_name"] != "legacy-gemini" {
+		t.Errorf("failure command_name = %v, want legacy-gemini", failure["command_name"])
 	}
 	reason, _ := failure["reason"].(string)
-	if !strings.Contains(reason, "unsupported runtime_type: gemini") {
-		t.Errorf("failure reason = %q, want unsupported runtime_type: gemini", reason)
+	if !strings.Contains(reason, "unsupported runtime_type: legacy-gemini") {
+		t.Errorf("failure reason = %q, want unsupported runtime_type: legacy-gemini", reason)
 	}
 }
 
