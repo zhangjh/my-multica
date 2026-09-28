@@ -17,7 +17,7 @@
 #   ./start.sh ensure          # idempotent: start only what is down (no build,
 #                              # no migrate, no nginx) — for cron/systemd timers
 #   ./start.sh logs backend -f
-#   ./start.sh build           # force rebuild + migrate, keep serving
+#   ./start.sh build           # force rebuild, recreate the container, keep serving
 #   ./start.sh migrate         # apply DB migrations only
 #   ./start.sh daemon restart
 #   ./start.sh nginx reload
@@ -678,16 +678,42 @@ app_compose_running() {
   [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" = "true" ]
 }
 
+# True when the container was created from an image the tag no longer points
+# at — a rebuild that `up -d` would otherwise leave unserved. Compares the
+# image ID frozen into the container against the ID the tag resolves to now.
+app_compose_image_stale() {
+  local cid ref cid_image ref_image
+  cid="$(app_compose_cid)" || return 1
+  [ -n "$cid" ] || return 1
+  ref="$(docker inspect -f '{{.Config.Image}}' "$cid" 2>/dev/null)"
+  cid_image="$(docker inspect -f '{{.Image}}' "$cid" 2>/dev/null)"
+  [ -n "$ref" ] && [ -n "$cid_image" ] || return 1
+  ref_image="$(docker image inspect -f '{{.Id}}' "$ref" 2>/dev/null)"
+  [ -n "$ref_image" ] || return 1
+  [ "$cid_image" != "$ref_image" ]
+}
+
+# Brings the backend container up. Pass --force-recreate after a rebuild so the
+# new image actually takes effect: a healthy container makes plain `up -d` a
+# no-op, so the old binary would keep serving and the entrypoint would never
+# re-run migrations. The same recreate is applied automatically when the
+# container is found to predate the image its tag points at.
 app_compose_up() {
   step "service: backend (docker compose)"
   local cid out
-  if app_compose_running && [ "$(http_code "http://127.0.0.1:$BACKEND_PORT/health")" = "200" ]; then
+  local -a up_args=(up -d)
+  if [ "${1:-}" = "--force-recreate" ]; then
+    up_args+=(--force-recreate)
+  elif app_compose_image_stale; then
+    warn "backend container predates the image its tag points at; recreating it"
+    up_args+=(--force-recreate)
+  elif app_compose_running && [ "$(http_code "http://127.0.0.1:$BACKEND_PORT/health")" = "200" ]; then
     ok "backend container already running and healthy ($(app_compose_cid | cut -c1-12))"
     return 0
   fi
-  if ! out="$(compose up -d backend 2>&1)"; then
+  if ! out="$(compose "${up_args[@]}" backend 2>&1)"; then
     printf '%s\n' "$out" >&2
-    fail "docker compose up -d backend failed"
+    fail "docker compose ${up_args[*]} backend failed"
   fi
   printf '%s\n' "$out" | sed 's/^/    /'
   cid="$(app_compose_cid)"
@@ -1001,9 +1027,12 @@ cmd_build() {
     export VERSION COMMIT DATE
     dim "VERSION=$VERSION COMMIT=$COMMIT"
     compose build backend || fail "docker compose build backend failed"
-    app_compose_up
+    # The rebuilt image is only picked up by a recreate; without it the healthy
+    # old container keeps serving and its entrypoint never re-runs migrations.
+    app_compose_up --force-recreate
     app_compose_wait_healthy || fail "the rebuilt image did not become healthy on :$BACKEND_PORT"
     ok "build finished and serving"
+    dim "note: the web frontend is not part of this image — deploy it separately (see scripts/deploy-web-cloudflare.sh)"
     return 0
   fi
   ensure_go
