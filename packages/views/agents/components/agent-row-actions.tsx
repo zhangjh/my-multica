@@ -3,6 +3,7 @@
 import { useState } from "react";
 import {
   AlertCircle,
+  ArrowUpFromLine,
   Copy,
   ExternalLink,
   MoreHorizontal,
@@ -50,6 +51,12 @@ interface AgentRowActionsProps {
   // this agent's config as a template. A href rather than a callback so the
   // menu item is a real link (modifier-click opens it in a new tab).
   duplicateHref: string;
+  // Workspace owner/admin, which is what the export endpoint requires. The
+  // server enforces the same gate; an agent owner who is not a workspace admin
+  // gets no "Export" item because the request would be refused.
+  canExport: boolean;
+  // Opens the export dialog with this agent preselected.
+  onExportRequest: (agentId: string) => void;
 }
 
 /**
@@ -68,6 +75,8 @@ export function AgentRowActions({
   presence,
   canManage,
   duplicateHref,
+  canExport,
+  onExportRequest,
 }: AgentRowActionsProps) {
   const { t } = useT("agents");
   const { t: tCommon } = useT("common");
@@ -95,6 +104,9 @@ export function AgentRowActions({
   const isSystemAgent = !!agent.system_key;
   const showArchive = canManage && !isArchived && !isSystemAgent;
   const showRestore = canManage && isArchived;
+  // Multica's built-in agents are not exportable either — the server drops
+  // every system_key agent from an export file.
+  const showExport = canExport && !isSystemAgent;
 
   const invalidateAgents = () => {
     qc.invalidateQueries({ queryKey: workspaceKeys.agents(wsId) });
@@ -178,6 +190,12 @@ export function AgentRowActions({
             <DropdownMenuItem render={<AppLink href={duplicateHref} />}>
               <Copy className="h-3.5 w-3.5" />
               {t(($) => $.row_actions.duplicate)}
+            </DropdownMenuItem>
+          )}
+          {showExport && (
+            <DropdownMenuItem onClick={() => onExportRequest(agent.id)}>
+              <ArrowUpFromLine className="h-3.5 w-3.5" />
+              {t(($) => $.export_import.export_row_action)}
             </DropdownMenuItem>
           )}
           {showRestore && (

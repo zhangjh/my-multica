@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -11,10 +11,12 @@ import {
   CheckCircle2,
   Loader2,
   RefreshCw,
+  Search,
   SkipForward,
   Upload,
 } from "lucide-react";
 import type {
+  Agent,
   AgentExportFile,
   AgentImportConflictMode,
   AgentImportResult,
@@ -24,8 +26,13 @@ import { api } from "@multica/core/api";
 import { AgentExportFileSchema } from "@multica/core/api/schemas";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { runtimeDisplayLabel, runtimeListOptions } from "@multica/core/runtimes";
-import { workspaceKeys } from "@multica/core/workspace/queries";
+import {
+  agentListOptions,
+  workspaceKeys,
+} from "@multica/core/workspace/queries";
+import { Badge } from "@multica/ui/components/ui/badge";
 import { Button } from "@multica/ui/components/ui/button";
+import { Checkbox } from "@multica/ui/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -40,6 +47,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@multica/ui/components/ui/dropdown-menu";
+import { Input } from "@multica/ui/components/ui/input";
 import { Label } from "@multica/ui/components/ui/label";
 import {
   Select,
@@ -49,17 +57,21 @@ import {
   SelectValue,
 } from "@multica/ui/components/ui/select";
 import { useT } from "../../i18n";
+import { matchesPinyin } from "../../editor/extensions/pinyin-match";
 
 /**
- * Workspace-wide agent configuration export/import (server:
- * `GET /api/agents/export`, `POST /api/agents/import`). Both endpoints are
- * workspace owner/admin only; the page hides this menu for everyone else, and
- * the server enforces the same gate.
+ * Agent configuration export/import (server: `GET /api/agents/export`,
+ * `POST /api/agents/import`). Both endpoints are workspace owner/admin only;
+ * the page hides this menu for everyone else, and the server enforces the same
+ * gate.
  *
  * Export downloads a multica-agent-export JSON file (identical to the CLI's
  * `multica agent export` output) so it can be moved across instances or
- * imported back via the CLI. Import restores such a file; conflicts are
- * handled per the chosen on_conflict mode (skip / fail / rename).
+ * imported back via the CLI. The file is per-workspace by default and can be
+ * narrowed to a chosen set of agents — from the export dialog, from a single
+ * row's menu, or from a multi-row selection in the list. Import restores such
+ * a file; conflicts are handled per the chosen on_conflict mode
+ * (skip / fail / rename).
  */
 
 function downloadExportFile(file: AgentExportFile) {
@@ -76,6 +88,295 @@ function downloadExportFile(file: AgentExportFile) {
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+}
+
+/**
+ * Downloads an export file for exactly the given agents and returns how many
+ * agents it ended up carrying. Shared by the export dialog and the list's
+ * batch action so both issue the same request.
+ *
+ * `include_archived` follows the selection: the server leaves archived agents
+ * out unless asked, so exporting a chosen archived agent has to flip the flag
+ * or the file would come back one agent short of what the user picked.
+ */
+export async function exportAgentsToFile(opts: {
+  workspaceId: string;
+  agents: readonly Agent[];
+}): Promise<number> {
+  const file = await api.exportAgents({
+    workspace_id: opts.workspaceId,
+    agent_ids: opts.agents.map((a) => a.id),
+    ...(opts.agents.some((a) => a.archived_at)
+      ? { include_archived: true }
+      : {}),
+  });
+  if (file.agents.length === 0) return 0;
+  downloadExportFile(file);
+  return file.agents.length;
+}
+
+/**
+ * The "Export agents" dialog: pick which agents go into the export file, then
+ * download it. Opened from the header menu with no preset (so the whole
+ * workspace is preselected) and from a row's menu or a multi-row selection
+ * with that selection preselected — either way the user can still widen or
+ * narrow it before exporting.
+ */
+export function AgentExportDialog({
+  open,
+  onOpenChange,
+  presetAgentIds,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  /** Pre-selected agent ids. Empty/undefined selects every exportable agent. */
+  presetAgentIds?: readonly string[];
+}) {
+  const { t } = useT("agents");
+  const wsId = useWorkspaceId();
+  const { data: agents = [], isFetched } = useQuery(agentListOptions(wsId));
+
+  // Product-managed agents (system_key) are skipped by the server because they
+  // cannot be recreated on another instance. Hiding them here keeps the
+  // "Export N agents" count honest.
+  const exportable = useMemo(
+    () =>
+      agents
+        .filter((a) => !a.system_key)
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [agents],
+  );
+
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [query, setQuery] = useState("");
+  const [exporting, setExporting] = useState(false);
+  // Whether this open already seeded its selection (see below).
+  const [seeded, setSeeded] = useState(false);
+
+  // Latest preset + list, read by the seeding effect below. Both have to stay
+  // out of that effect's dependencies: the agent list refetches in the
+  // background, and re-seeding on every refetch would throw away what the user
+  // is still editing.
+  const latest = useRef({ preset: presetAgentIds, exportable });
+  useEffect(() => {
+    latest.current = { preset: presetAgentIds, exportable };
+  });
+
+  // A fresh open starts from the caller's preset, or from every exportable
+  // agent when there is none. Seeding waits for the list to arrive: doing it
+  // on open alone would select nothing whenever the query was still in flight,
+  // and the effect deliberately does not run again once it has seeded.
+  useEffect(() => {
+    if (!open) setSeeded(false);
+  }, [open]);
+  useEffect(() => {
+    if (!open || seeded || !isFetched) return;
+    const { preset, exportable: all } = latest.current;
+    setQuery("");
+    setSelected(
+      new Set(preset && preset.length > 0 ? preset : all.map((a) => a.id)),
+    );
+    setSeeded(true);
+  }, [open, seeded, isFetched, exportable]);
+
+  const trimmedQuery = query.trim().toLowerCase();
+  const visible = useMemo(
+    () =>
+      trimmedQuery
+        ? exportable.filter(
+            (a) =>
+              a.name.toLowerCase().includes(trimmedQuery) ||
+              matchesPinyin(a.name, trimmedQuery),
+          )
+        : exportable,
+    [exportable, trimmedQuery],
+  );
+
+  // Resolving the selection against the current list drops ids for agents that
+  // disappeared while the dialog was open, so the count and the request agree.
+  const chosen = useMemo(() => {
+    const byId = new Map(exportable.map((a) => [a.id, a]));
+    return [...selected].flatMap((id) => {
+      const agent = byId.get(id);
+      return agent ? [agent] : [];
+    });
+  }, [exportable, selected]);
+
+  const toggle = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const selectAllVisible = () => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      for (const a of visible) next.add(a.id);
+      return next;
+    });
+  };
+
+  const handleClose = () => {
+    if (exporting) return;
+    onOpenChange(false);
+  };
+
+  const handleExport = async () => {
+    if (chosen.length === 0) return;
+    setExporting(true);
+    try {
+      const count = await exportAgentsToFile({
+        workspaceId: wsId,
+        agents: chosen,
+      });
+      if (count === 0) {
+        toast.info(t(($) => $.export_import.export_none_to_export));
+        return;
+      }
+      toast.success(t(($) => $.export_import.export_done, { count }));
+      onOpenChange(false);
+    } catch (error) {
+      toast.error(
+        t(($) => $.export_import.export_error, {
+          message: error instanceof Error ? error.message : "",
+        }),
+      );
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => (v ? undefined : handleClose())}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="text-body">
+            {t(($) => $.export_import.export_dialog_title)}
+          </DialogTitle>
+          <DialogDescription className="text-caption">
+            {t(($) => $.export_import.export_dialog_description)}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-2 py-1">
+          <div className="flex items-center justify-between gap-2">
+            <Label className="text-caption text-muted-foreground">
+              {t(($) => $.export_import.export_agents_label, {
+                count: chosen.length,
+              })}
+            </Label>
+            <div className="flex items-center gap-1">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-caption"
+                disabled={exporting || visible.length === 0}
+                onClick={selectAllVisible}
+              >
+                {t(($) => $.export_import.export_select_all)}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-caption"
+                disabled={exporting || chosen.length === 0}
+                onClick={() => setSelected(new Set())}
+              >
+                {t(($) => $.export_import.export_clear_selection)}
+              </Button>
+            </div>
+          </div>
+
+          <div className="rounded-lg border bg-card">
+            <div className="relative border-b p-2">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={t(($) => $.export_import.export_search_placeholder)}
+                className="h-8 pl-7 text-caption"
+              />
+            </div>
+
+            <div className="max-h-64 space-y-0.5 overflow-y-auto p-1.5">
+              {exportable.length === 0 ? (
+                <div className="py-6 text-center text-caption text-muted-foreground">
+                  {t(($) => $.export_import.export_list_empty)}
+                </div>
+              ) : visible.length === 0 ? (
+                <div className="py-6 text-center text-caption text-muted-foreground">
+                  {t(($) => $.export_import.export_list_no_match)}
+                </div>
+              ) : (
+                visible.map((agent) => {
+                  const isSelected = selected.has(agent.id);
+                  return (
+                    <button
+                      key={agent.id}
+                      type="button"
+                      onClick={() => toggle(agent.id)}
+                      aria-pressed={isSelected}
+                      className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left transition-colors ${
+                        isSelected ? "bg-accent" : "hover:bg-accent/50"
+                      }`}
+                    >
+                      {/* Indicator only — the wrapping <button> handles the
+                          click, so the Checkbox is non-interactive itself. */}
+                      <Checkbox
+                        checked={isSelected}
+                        tabIndex={-1}
+                        className="pointer-events-none"
+                      />
+                      <span className="min-w-0 flex-1 truncate text-body font-medium">
+                        {agent.name}
+                      </span>
+                      {agent.archived_at ? (
+                        <Badge variant="secondary">
+                          {t(($) => $.row.archived)}
+                        </Badge>
+                      ) : null}
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={handleClose}
+            disabled={exporting}
+          >
+            {t(($) => $.export_import.import_cancel)}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => void handleExport()}
+            disabled={chosen.length === 0 || exporting}
+          >
+            {exporting ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                {t(($) => $.export_import.export_submitting)}
+              </>
+            ) : (
+              t(($) => $.export_import.export_submit, { count: chosen.length })
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 function ImportResultIcon({ status }: { status: AgentImportResult["status"] }) {
@@ -402,36 +703,17 @@ export function AgentImportDialog({
 /**
  * Header action behind which export and import live. Rendered only for
  * workspace owners/admins (the server also enforces the gate). Exported
- * separately for testing; the menu itself is a dumb trigger.
+ * separately for testing; the menu itself is a dumb trigger — both items just
+ * ask the page to open the matching dialog.
  */
 export function AgentExportImportActions({
   onImportRequest,
+  onExportRequest,
 }: {
   onImportRequest: () => void;
+  onExportRequest: () => void;
 }) {
   const { t } = useT("agents");
-  const wsId = useWorkspaceId();
-  const [exporting, setExporting] = useState(false);
-
-  const handleExport = async () => {
-    setExporting(true);
-    try {
-      const file = await api.exportAgents({ workspace_id: wsId });
-      if (file.agents.length === 0) {
-        toast.info(t(($) => $.export_import.import_file_empty));
-        return;
-      }
-      downloadExportFile(file);
-    } catch (error) {
-      toast.error(
-        t(($) => $.export_import.export_error, {
-          message: error instanceof Error ? error.message : "",
-        }),
-      );
-    } finally {
-      setExporting(false);
-    }
-  };
 
   return (
     <DropdownMenu>
@@ -460,15 +742,10 @@ export function AgentExportImportActions({
           {t(($) => $.export_import.import_action)}
         </DropdownMenuItem>
         <DropdownMenuItem
-          onClick={() => void handleExport()}
-          disabled={exporting}
+          onClick={onExportRequest}
           className="items-center gap-2"
         >
-          {exporting ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <ArrowUpFromLine className="h-3.5 w-3.5" />
-          )}
+          <ArrowUpFromLine className="h-3.5 w-3.5" />
           {t(($) => $.export_import.export_action)}
         </DropdownMenuItem>
       </DropdownMenuContent>

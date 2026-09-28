@@ -88,7 +88,13 @@ function makeRow(
   };
 }
 
-function renderToolbar(rows: AgentListRow[]) {
+function renderToolbar(
+  rows: AgentListRow[],
+  opts: {
+    canExport?: boolean;
+    onExportRequest?: (agentIds: string[]) => void;
+  } = {},
+) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const ui = (nextRows: AgentListRow[]) => (
     <QueryClientProvider client={qc}>
@@ -98,6 +104,8 @@ function renderToolbar(rows: AgentListRow[]) {
           members={[]}
           currentUserId="user-1"
           onClear={() => {}}
+          canExport={opts.canExport ?? false}
+          onExportRequest={opts.onExportRequest ?? (() => {})}
         />
       </I18nProvider>
     </QueryClientProvider>
@@ -129,6 +137,52 @@ describe("AgentBatchToolbar — action order", () => {
       .filter((text): text is string => !!text);
 
     expect(actions).toEqual(["Restore", "Set access scope", "Archive"]);
+  });
+});
+
+describe("AgentBatchToolbar — batch export", () => {
+  it("is hidden unless the caller is a workspace admin", () => {
+    renderToolbar([makeRow("a", "user-1")]);
+    expect(
+      screen.queryByRole("button", { name: /Export/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hands the selected, non-system agents to the export dialog", () => {
+    const onExportRequest = vi.fn();
+    renderToolbar(
+      [
+        makeRow("a", "user-1"),
+        makeRow("b", "user-1", { system_key: "workspace_entry" }),
+        makeRow("c", "user-1"),
+      ],
+      { canExport: true, onExportRequest },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Export (2)" }));
+
+    // The built-in agent is skipped — the server drops system agents from
+    // every export, so offering it would understate what lands in the file.
+    expect(onExportRequest).toHaveBeenCalledWith(["a", "c"]);
+  });
+
+  it("sits between Set access scope and Archive", () => {
+    renderToolbar(
+      [makeRow("a", "user-1", { archived_at: "2026-01-01T00:00:00Z" }), makeRow("b", "user-1")],
+      { canExport: true },
+    );
+
+    const actions = screen
+      .getAllByRole("button")
+      .map((b) => b.textContent?.trim())
+      .filter((text): text is string => !!text);
+
+    expect(actions).toEqual([
+      "Restore",
+      "Set access scope",
+      "Export (2)",
+      "Archive",
+    ]);
   });
 });
 

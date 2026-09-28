@@ -1840,18 +1840,23 @@ export class ApiClient {
   }
 
   /**
-   * Workspace-wide agent configuration export (`GET /api/agents/export`).
-   * Owner/admin only. Returns a full multica-agent-export file (agents +
-   * skills + runtimes, with plaintext custom_env/mcp_config); caller decides
-   * how to persist it (the CLI and the web UI both serialize it to JSON).
+   * Agent configuration export (`GET /api/agents/export`).
+   * Owner/admin only. `agent_ids` narrows the file to the selected agents
+   * (one repeated param per id); omit it to export the whole workspace.
+   * `include_archived` is required for an archived agent to appear in either
+   * kind of export. Returns a full multica-agent-export file (agents + skills
+   * + runtimes, with plaintext custom_env/mcp_config); caller decides how to
+   * persist it (the CLI and the web UI both serialize it to JSON).
    */
   async exportAgents(params?: {
     workspace_id?: string;
     include_archived?: boolean;
+    agent_ids?: string[];
   }): Promise<AgentExportFile> {
     const search = new URLSearchParams();
     if (params?.workspace_id) search.set("workspace_id", params.workspace_id);
     if (params?.include_archived) search.set("include_archived", "true");
+    for (const id of params?.agent_ids ?? []) search.append("agent_ids", id);
     const qs = search.toString() !== "" ? `?${search.toString()}` : "";
     const raw = await this.fetch<unknown>(`/api/agents/export${qs}`);
     return parseWithFallback(
