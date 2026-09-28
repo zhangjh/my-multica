@@ -843,12 +843,13 @@ export interface UpdateAgentEnvRequest {
 }
 
 // ---------------------------------------------------------------------------
-// Workspace-wide agent configuration export / import
+// Agent configuration export / import
 // ---------------------------------------------------------------------------
 
 /**
- * Wire shapes for the workspace-level agent export (`GET /api/agents/export`)
- * and import (`POST /api/agents/import`) endpoints. The JSON is deliberately
+ * Wire shapes for the agent export (`GET /api/agents/export`) and import
+ * (`POST /api/agents/import`) endpoints. Export covers the whole workspace
+ * unless `agent_ids` narrows it to a chosen set. The JSON is deliberately
  * identical to the CLI's `multica agent export` file so a file exported from
  * the web UI can be re-imported with the CLI and vice-versa. Secrets travel in
  * plaintext in these payloads (custom_env / mcp_config); both endpoints are

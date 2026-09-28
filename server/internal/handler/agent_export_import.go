@@ -105,9 +105,51 @@ type agentImportResult struct {
 	Error    string   `json:"error,omitempty"`
 }
 
+// agentIDsFromQuery collects the `agent_ids` selection from a request. The
+// param is repeatable (one per selected agent) and also tolerates a
+// comma-separated list, so a hand-written URL and the web client's
+// `agent_ids=a&agent_ids=b` behave identically. Blank entries are dropped and
+// an empty result means "no selection", i.e. export the whole workspace.
+func agentIDsFromQuery(values []string) map[string]bool {
+	ids := make(map[string]bool, len(values))
+	for _, value := range values {
+		for _, id := range strings.Split(value, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				ids[id] = true
+			}
+		}
+	}
+	return ids
+}
+
+// selectAgentsForExport narrows a workspace's agent list to the requested
+// selection. It filters the list the caller already scoped to the workspace,
+// so an id belonging to another workspace (or a non-existent one) is silently
+// unmatched rather than looked up — the endpoint cannot be used to probe for
+// foreign ids. An empty selection keeps the whole list.
+func selectAgentsForExport(agents []db.Agent, onlyIDs map[string]bool) []db.Agent {
+	if len(onlyIDs) == 0 {
+		return agents
+	}
+	selected := make([]db.Agent, 0, len(onlyIDs))
+	for i := range agents {
+		if onlyIDs[uuidToString(agents[i].ID)] {
+			selected = append(selected, agents[i])
+		}
+	}
+	return selected
+}
+
 // ExportAgents serialises the workspace's user agents into a portable JSON
 // file. Only a workspace owner or admin may export, and the file includes
 // plaintext secrets (custom_env, mcp_config) on that exact basis.
+//
+// The whole workspace is exported by default. `agent_ids` (repeatable, and
+// also accepted comma-separated) narrows the file to the listed agents, which
+// is what the web UI's per-agent export sends; the filter runs over this
+// workspace's own agent list, so an id from another workspace simply never
+// matches instead of leaking anything. `include_archived=true` is still needed
+// for an archived agent to be part of either kind of export.
 //
 // The wire format is shared with the CLI's `multica agent export`
 // (cmd/multica/cmd_agent_export_import.go), so the exported JSON can be
@@ -134,6 +176,7 @@ func (h *Handler) ExportAgents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	onlyIDs := agentIDsFromQuery(r.URL.Query()["agent_ids"])
 	var err error
 	var agents []db.Agent
 	if r.URL.Query().Get("include_archived") == "true" {
@@ -145,6 +188,7 @@ func (h *Handler) ExportAgents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list agents")
 		return
 	}
+	agents = selectAgentsForExport(agents, onlyIDs)
 
 	runtimes, err := h.Queries.ListAgentRuntimes(ctx, wsUUID)
 	if err != nil {
@@ -278,7 +322,11 @@ func (h *Handler) ExportAgents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(export.Agents) == 0 {
-		writeError(w, http.StatusBadRequest, "no agents to export")
+		if len(onlyIDs) > 0 {
+			writeError(w, http.StatusBadRequest, "no agents matched the selection")
+		} else {
+			writeError(w, http.StatusBadRequest, "no agents to export")
+		}
 		return
 	}
 

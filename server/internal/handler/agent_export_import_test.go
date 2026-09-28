@@ -52,6 +52,96 @@ func TestAgentExportImport_RestrictedToOwnerAdmin(t *testing.T) {
 	testutil.Call(t, testHandler.ImportAgents, importReq).Want(http.StatusForbidden)
 }
 
+func TestAgentExport_AgentIDSelection(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	runtimeID := handlerTestRuntimeID(t)
+	wanted := dbfx.Agent(t, "export-pick-me-"+t.Name(), runtimeID)
+	other := dbfx.Agent(t, "export-leave-me-"+t.Name(), runtimeID)
+
+	exportedIDs := func(t *testing.T, query string) []string {
+		t.Helper()
+		req := importExportRequest("GET", "/api/agents/export"+query, nil)
+		rec := testutil.Call(t, testHandler.ExportAgents, req).Want(http.StatusOK)
+		var export agentExport
+		rec.JSON(&export)
+		ids := make([]string, 0, len(export.Agents))
+		for _, a := range export.Agents {
+			ids = append(ids, a.SourceID)
+		}
+		return ids
+	}
+
+	t.Run("single agent", func(t *testing.T) {
+		ids := exportedIDs(t, "?agent_ids="+wanted)
+		if !slices.Equal(ids, []string{wanted}) {
+			t.Fatalf("agents = %v, want only %s", ids, wanted)
+		}
+	})
+
+	t.Run("repeated param", func(t *testing.T) {
+		ids := exportedIDs(t, "?agent_ids="+wanted+"&agent_ids="+other)
+		slices.Sort(ids)
+		want := []string{wanted, other}
+		slices.Sort(want)
+		if !slices.Equal(ids, want) {
+			t.Fatalf("agents = %v, want %v", ids, want)
+		}
+	})
+
+	t.Run("comma separated", func(t *testing.T) {
+		ids := exportedIDs(t, "?agent_ids="+wanted+","+other)
+		slices.Sort(ids)
+		want := []string{wanted, other}
+		slices.Sort(want)
+		if !slices.Equal(ids, want) {
+			t.Fatalf("agents = %v, want %v", ids, want)
+		}
+	})
+
+	t.Run("no param exports the whole workspace", func(t *testing.T) {
+		ids := exportedIDs(t, "")
+		if !slices.Contains(ids, wanted) || !slices.Contains(ids, other) {
+			t.Fatalf("agents = %v, want both fixtures present", ids)
+		}
+	})
+
+	// An id from another workspace must be unmatched, never resolved: the
+	// filter runs over this workspace's own list, so the endpoint cannot be
+	// used to confirm whether a foreign agent id exists.
+	t.Run("agent in another workspace does not match", func(t *testing.T) {
+		// dbfx is pinned to the test workspace, so the second one is built by
+		// hand; agent/agent_runtime cascade away with the workspace row.
+		otherWS := dbfx.Workspace(t, "Export Foreign WS", "export-foreign-"+t.Name())
+		t.Cleanup(func() {
+			testPool.Exec(context.Background(), `DELETE FROM workspace WHERE id = $1`, otherWS)
+		})
+		dbfx.Exec(t, `INSERT INTO agent_runtime
+			(workspace_id, name, runtime_mode, provider, status, visibility, owner_id)
+			VALUES ($1, 'Foreign RT', 'cloud', 'foreign', 'online', 'private', $2)`, otherWS, testUserID)
+		var foreignRT string
+		dbfx.QueryRow(t, `SELECT id FROM agent_runtime WHERE workspace_id = $1`, otherWS).Scan(&foreignRT)
+		dbfx.Exec(t, `INSERT INTO agent
+			(workspace_id, runtime_id, name, runtime_mode, permission_mode, owner_id)
+			VALUES ($1, $2, 'foreign-agent', 'cloud', 'private', $3)`, otherWS, foreignRT, testUserID)
+		var foreignAgent string
+		dbfx.QueryRow(t, `SELECT id FROM agent WHERE workspace_id = $1`, otherWS).Scan(&foreignAgent)
+
+		rec := testutil.Call(t, testHandler.ExportAgents,
+			importExportRequest("GET", "/api/agents/export?agent_ids="+foreignAgent, nil))
+		// 400 rather than the foreign agent's configuration: the id is not
+		// resolved, it is simply absent from this workspace's list.
+		rec.Want(http.StatusBadRequest)
+	})
+
+	t.Run("unmatched selection is a 400", func(t *testing.T) {
+		testutil.Call(t, testHandler.ExportAgents,
+			importExportRequest("GET", "/api/agents/export?agent_ids=00000000-0000-0000-0000-000000000000", nil)).
+			Want(http.StatusBadRequest)
+	})
+}
+
 func TestAgentExport_IncludesSecretsSkillsAndRuntime(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")

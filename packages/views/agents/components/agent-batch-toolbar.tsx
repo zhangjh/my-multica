@@ -21,7 +21,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@multica/ui/components/ui/dialog";
-import { Archive, ArchiveRestore, Loader2, X } from "lucide-react";
+import { Archive, ArchiveRestore, ArrowUpFromLine, Loader2, X } from "lucide-react";
 import { useT } from "../../i18n";
 import { AccessPicker, type AccessChange } from "./inspector/access-picker";
 import type { AgentListRow } from "./agents-page";
@@ -41,11 +41,18 @@ export function AgentBatchToolbar({
   members,
   currentUserId,
   onClear,
+  canExport,
+  onExportRequest,
 }: {
   rows: AgentListRow[];
   members: MemberWithUser[];
   currentUserId: string | null;
   onClear: () => void;
+  // Workspace owner/admin — the gate the export endpoint enforces. Only then
+  // is the batch "Export" action offered.
+  canExport: boolean;
+  // Opens the export dialog with the current selection preselected.
+  onExportRequest: (agentIds: string[]) => void;
 }) {
   const { t } = useT("agents");
   const wsId = useWorkspaceId();
@@ -78,6 +85,9 @@ export function AgentBatchToolbar({
   const anyOwned = ownedRows.length > 0;
   const anyActive = rows.some((r) => !r.agent.archived_at);
   const anyArchived = rows.some((r) => !!r.agent.archived_at);
+  // The server drops system agents from every export, so a selection made up
+  // only of those has nothing to export.
+  const exportableRows = rows.filter((r) => !r.agent.system_key);
 
   const invalidate = () =>
     qc.invalidateQueries({ queryKey: workspaceKeys.agents(wsId) });
@@ -209,6 +219,19 @@ export function AgentBatchToolbar({
             onClick={() => setAccessDialogOpen(true)}
           >
             {t(($) => $.row_actions.set_access)}
+          </Button>
+        )}
+        {canExport && exportableRows.length > 0 && (
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={busy}
+            onClick={() => onExportRequest(exportableRows.map((r) => r.agent.id))}
+          >
+            <ArrowUpFromLine className="mr-1 size-3.5" />
+            {t(($) => $.export_import.export_batch_action, {
+              count: exportableRows.length,
+            })}
           </Button>
         )}
         {/* Archive sits last: it is the destructive action, kept furthest from

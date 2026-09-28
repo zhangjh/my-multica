@@ -70,6 +70,7 @@ import {
 import { availabilityConfig } from "../presence";
 import { AgentRowActions } from "./agent-row-actions";
 import {
+  AgentExportDialog,
   AgentExportImportActions,
   AgentImportDialog,
 } from "./agent-export-import";
@@ -257,11 +258,13 @@ function PageHeaderBar({
   onCreate,
   isAdmin,
   onImport,
+  onExport,
 }: {
   totalCount: number;
   onCreate: () => void;
   isAdmin?: boolean;
   onImport?: () => void;
+  onExport?: () => void;
 }) {
   const { t } = useT("agents");
   return (
@@ -276,8 +279,11 @@ function PageHeaderBar({
       }}
       actions={
         <>
-          {isAdmin && onImport ? (
-            <AgentExportImportActions onImportRequest={onImport} />
+          {isAdmin && onImport && onExport ? (
+            <AgentExportImportActions
+              onImportRequest={onImport}
+              onExportRequest={onExport}
+            />
           ) : null}
           <CollectionPageHeaderAction
             icon={Plus}
@@ -811,6 +817,13 @@ export function AgentsPage(_props: AgentsPageProps = {}) {
   );
   const [search, setSearch] = useState("");
   const [importOpen, setImportOpen] = useState(false);
+  // Export opens the same dialog from three places: the header menu (no
+  // preset), a row's menu, and the batch toolbar. `exportPresetIds` carries
+  // whichever selection triggered it, or undefined for "everything".
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportPresetIds, setExportPresetIds] = useState<
+    readonly string[] | undefined
+  >(undefined);
 
   const rawScope = useAgentsViewStore((s) => s.scope);
   const scope = AGENT_SCOPES.includes(rawScope) ? rawScope : "mine";
@@ -860,6 +873,14 @@ export function AgentsPage(_props: AgentsPageProps = {}) {
     const me = members.find((m) => m.user_id === currentUser.id);
     return me?.role === "owner" || me?.role === "admin";
   }, [members, currentUser]);
+
+  // One opener for all three entry points. No preset means "every exportable
+  // agent" in the dialog; `useCallback` keeps it stable so the row list and
+  // the batch toolbar don't re-render on every parent render.
+  const openExport = useCallback((agentIds?: readonly string[]) => {
+    setExportPresetIds(agentIds);
+    setExportOpen(true);
+  }, []);
 
   // Scope counts come from the FULL set (filters never affect them).
   // Archived ignores the ownership lens (see the view store comment).
@@ -1054,6 +1075,7 @@ export function AgentsPage(_props: AgentsPageProps = {}) {
         onCreate={() => navigation.push(paths.newAgent())}
         isAdmin={isWorkspaceAdmin}
         onImport={() => setImportOpen(true)}
+        onExport={() => openExport()}
       />
 
       {isLoading || (!showEmpty && !listReady) ? (
@@ -1190,6 +1212,8 @@ export function AgentsPage(_props: AgentsPageProps = {}) {
                             presence={row.presence}
                             canManage={row.canManage}
                             duplicateHref={duplicateHref(row.agent)}
+                            canExport={isWorkspaceAdmin}
+                            onExportRequest={(agentId) => openExport([agentId])}
                           />
                         </span>
                       </ListGridCell>
@@ -1207,10 +1231,17 @@ export function AgentsPage(_props: AgentsPageProps = {}) {
         members={members}
         currentUserId={currentUser?.id ?? null}
         onClear={() => setSelectedIds(new Set())}
+        canExport={isWorkspaceAdmin}
+        onExportRequest={openExport}
       />
 
       <AgentImportDialog open={importOpen} onOpenChange={setImportOpen} />
 
+      <AgentExportDialog
+        open={exportOpen}
+        onOpenChange={setExportOpen}
+        presetAgentIds={exportPresetIds}
+      />
     </div>
   );
 }

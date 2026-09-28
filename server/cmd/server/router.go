@@ -2154,9 +2154,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				// the system instruction layer. Idempotent per workspace.
 				r.Post("/mika", h.CreateMikaAgent)
 				// Portable agent configuration export/import. Both endpoints
-				// are workspace owner/admin only and deny agent actors;
-				// they operate on the whole workspace at once rather than a
-				// single {id}. See internal/handler/agent_export_import.go.
+				// are workspace owner/admin only and deny agent actors.
+				// Neither is addressed by a single {id}: export covers the
+				// workspace and takes an optional agent_ids selection, import
+				// takes a whole file.
+				// See internal/handler/agent_export_import.go.
 				r.Get("/export", h.ExportAgents)
 				r.Post("/import", h.ImportAgents)
 				r.Route("/{id}", func(r chi.Router) {
