@@ -265,10 +265,12 @@ func ListModels(ctx context.Context, providerType string, runtimeCmd Command) (C
 			return discoverCodebuddyModels(ctx, runtimeCmd)
 		})
 	case "qwen":
-		// Qwen Code has no account-independent headless model catalog. An
-		// empty list keeps the runtime default and manual model entry available
-		// without advertising a Token-Plan-specific model to other accounts.
-		return Catalog{Models: []Model{}}, nil
+		// Qwen Code has no `models list` subcommand either, so dynamic
+		// discovery is impossible and the picker is served a static catalog —
+		// the same shape Gemini uses. Manual entry stays available for the
+		// account-specific ids a Token/Coding Plan subscriber reaches (see
+		// qwenStaticModels).
+		return Catalog{Models: qwenStaticModels()}, nil
 	case "qwenpaw":
 		// QwenPaw's model selection is unsupported (session/set_model
 		// persists to agent scope, not session scope), so there is no
@@ -477,6 +479,8 @@ func acceptedModelIDsForProvider(providerType string) (map[string]bool, bool) {
 		return modelIDSet(codexStaticModels()), true
 	case providerType == "gemini":
 		return modelIDSet(geminiStaticModels()), true
+	case providerType == "qwen":
+		return modelIDSet(qwenStaticModels()), true
 	default:
 		return nil, false
 	}
@@ -497,7 +501,8 @@ func isRuntimeSpecificModelID(model string) bool {
 	return modelHasKnownPrefix(model) ||
 		modelIDSet(claudeStaticModels())[model] ||
 		modelIDSet(codexStaticModels())[model] ||
-		modelIDSet(geminiStaticModels())[model]
+		modelIDSet(geminiStaticModels())[model] ||
+		modelIDSet(qwenStaticModels())[model]
 }
 
 func modelHasKnownPrefix(model string) bool {
@@ -725,6 +730,31 @@ func geminiStaticModels() []Model {
 		{ID: "gemini-2.5-pro", Label: "Gemini 2.5 Pro", Provider: "google"},
 		{ID: "gemini-2.5-flash", Label: "Gemini 2.5 Flash", Provider: "google"},
 		{ID: "gemini-2.5-flash-lite", Label: "Gemini 2.5 Flash Lite", Provider: "google"},
+	}
+}
+
+// qwenStaticModels lists the values we pass via `qwen --model`. Like Gemini,
+// Qwen Code ships no model-catalog command, so a static list is the only way
+// the picker can offer anything other than manual entry — an empty list is
+// what left the Qwen runtime with a dropdown that could only be typed into.
+//
+// Every id here is also a key in the pricing tables
+// (server/internal/metrics/pricing.go and packages/views/runtimes/utils.ts), so
+// a pick made here also prices correctly in the dashboard; an id added to this
+// list without a pricing row would show up as unmapped instead.
+//
+// Access is account-dependent — a Token/Coding Plan subscriber reaches a
+// different subset than pay-as-you-go — which is why manual entry remains the
+// escape hatch and why a stale row here is tolerable: the CLI rejects an
+// unentitled model with its own error rather than silently running something
+// else. Default is qwen3.8-max-preview, the model Qwen Code 0.20.0 reports in
+// its own stream-json output (testdata/qwen-code-0.20.0-stream-json.jsonl).
+func qwenStaticModels() []Model {
+	return []Model{
+		{ID: "qwen3.8-max-preview", Label: "Qwen3.8 Max Preview", Provider: "alibaba", Default: true},
+		{ID: "qwen3.8-max", Label: "Qwen3.8 Max", Provider: "alibaba"},
+		{ID: "qwen3.7-plus", Label: "Qwen3.7 Plus", Provider: "alibaba"},
+		{ID: "qwen3.6-flash", Label: "Qwen3.6 Flash", Provider: "alibaba"},
 	}
 }
 

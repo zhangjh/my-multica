@@ -19,6 +19,7 @@ func TestStaticModelCatalogsAreValid(t *testing.T) {
 		"codex":   codexStaticModels(),
 		"cursor":  cursorStaticModels(),
 		"copilot": copilotStaticModels(),
+		"qwen":    qwenStaticModels(),
 	}
 	for provider, models := range catalogs {
 		if len(models) == 0 {
@@ -42,17 +43,36 @@ func TestStaticModelCatalogsAreValid(t *testing.T) {
 	}
 }
 
-func TestListModelsQwenUsesRuntimeDefaultAndManualEntry(t *testing.T) {
-	// Qwen returns its manual-entry catalog without resolving or executing a CLI.
+func TestListModelsQwenOffersStaticCatalog(t *testing.T) {
+	// Qwen returns its static catalog without resolving or executing a CLI, so
+	// the runtime's model dropdown has something to list (ZHANG-35).
 	got, err := ListModels(context.Background(), "qwen", Command{Path: ""})
 	if err != nil {
 		t.Fatalf("ListModels(qwen) error: %v", err)
 	}
-	if len(got.Models) != 0 {
-		t.Fatalf("ListModels(qwen) = %+v, want no account-specific static catalog", got)
+	if len(got.Models) == 0 {
+		t.Fatal("ListModels(qwen) returned no models, want the static qwen catalog")
 	}
 	if got.Fallback {
-		t.Error("qwen's empty catalog is deliberate, not a discovery fallback")
+		t.Error("qwen's static catalog is not a discovery fallback")
+	}
+	want := []string{"qwen3.8-max-preview", "qwen3.8-max", "qwen3.7-plus", "qwen3.6-flash"}
+	gotIDs := make([]string, 0, len(got.Models))
+	defaults := 0
+	for _, m := range got.Models {
+		gotIDs = append(gotIDs, m.ID)
+		if m.Default {
+			defaults++
+		}
+	}
+	if !reflect.DeepEqual(gotIDs, want) {
+		t.Errorf("ListModels(qwen) ids = %v, want %v", gotIDs, want)
+	}
+	if defaults != 1 {
+		t.Errorf("ListModels(qwen) marked %d models Default, want exactly 1", defaults)
+	}
+	if !ModelSelectionSupported("qwen") {
+		t.Error("qwen honours --model, so ModelSelectionSupported must stay true")
 	}
 }
 
@@ -563,6 +583,24 @@ func TestModelKnownIncompatibleWithProvider(t *testing.T) {
 			name:     "unknown target provider does not clear",
 			provider: "opencode",
 			model:    "claude-sonnet-4-6",
+			want:     false,
+		},
+		{
+			name:     "qwen catalog model is compatible with qwen",
+			provider: "qwen",
+			model:    "qwen3.8-max-preview",
+			want:     false,
+		},
+		{
+			name:     "claude model is incompatible with qwen",
+			provider: "qwen",
+			model:    "claude-sonnet-4-6",
+			want:     true,
+		},
+		{
+			name:     "account-specific qwen model outside the catalog is not classified",
+			provider: "qwen",
+			model:    "qwen3-coder-plus",
 			want:     false,
 		},
 	}
