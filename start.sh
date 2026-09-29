@@ -23,6 +23,7 @@
 #   ./start.sh nginx reload
 #   ./start.sh bootstrap       # first-time host prep, then build
 #   ./start.sh autostart on    # install + enable the systemd boot units
+#                               # (`autostart on user` for a no-sudo user unit)
 #   ./start.sh autostart off   # disable and remove them
 #
 # Layout
@@ -65,12 +66,13 @@ WEB_DIR="$ROOT/apps/web"
 CLI_DEST="${MULTICA_CLI_DEST:-$HOME/.local/bin/multica}"
 GO_HOME="${MULTICA_GO_HOME:-$HOME/go/go}"
 PGDATA_DIR="${MULTICA_PGDATA:-$DATA/pgdata}"
-NATIVE_PG_PORT="${MULTICA_PG_PORT:-5433}"
+NATIVE_PG_PORT="${MULTICA_PG_PORT:-5433}"   # resolved against DATABASE_URL in load_env
 DB_MODE="${MULTICA_DB_MODE:-auto}"          # auto | container | native | external
 AUTO_GO="${MULTICA_AUTO_INSTALL_GO:-1}"
 LOG_MAX_BYTES="${MULTICA_LOG_MAX_BYTES:-52428800}"   # rotate a service log past 50 MB
 HEALTH_TIMEOUT="${MULTICA_HEALTH_TIMEOUT:-90}"
 SYSTEMD_DIR="${MULTICA_SYSTEMD_DIR:-/etc/systemd/system}"
+USER_UNIT_DIR="${MULTICA_USER_UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
 STOP_TIMEOUT="${MULTICA_STOP_TIMEOUT:-20}"
 PG_BOOTSTRAP="${MULTICA_DB_BOOTSTRAP:-0}"   # 1 = allow creating role/database
 COMPOSE_FILES=(
@@ -211,12 +213,20 @@ pid_cmdline() { tr '\0\n' '  ' <"/proc/$1/cmdline" 2>/dev/null || true; }
 # ---------------------------------------------------------------------------
 NODE_BIN=""; PNPM=""; GO=""; GO_VERSION=""
 
-resolve_node() {
-  local cand
+# Newest nvm-managed Node bin dir, or nothing when nvm is not in use. Split out
+# of resolve_node because the boot unit's PATH is built from it too, and a
+# Node upgrade must not require re-installing that unit.
+nvm_node_bin() {
+  local cand best=""
   for cand in "$HOME"/.nvm/versions/node/*/bin; do
     [ -d "$cand" ] || continue
-    if [ -z "$NODE_BIN" ] || [ "$cand" \> "$NODE_BIN" ]; then NODE_BIN="$cand"; fi
+    if [ -z "$best" ] || [ "$cand" \> "$best" ]; then best="$cand"; fi
   done
+  printf '%s' "$best"
+}
+
+resolve_node() {
+  NODE_BIN="$(nvm_node_bin)"
   [ -n "$NODE_BIN" ] && export PATH="$NODE_BIN:$PATH"
   if have pnpm; then PNPM="$(command -v pnpm)"; return 0; fi
   if have corepack && [ -n "$NODE_BIN" ]; then
@@ -352,6 +362,11 @@ load_env() {
   DB_PORT="$(url_component "$DB_URL" port)"
   DB_NAME="$(url_component "$DB_URL" db)"
   DB_USER="$(url_component "$DB_URL" user)"
+  # A native cluster has to be started on the port DATABASE_URL points at, or
+  # db_wait_ready waits for a port nothing is listening on. Default to the URL
+  # (5432 when the URL omits it) and only honour an explicit MULTICA_PG_PORT.
+  NATIVE_PG_PORT="${MULTICA_PG_PORT:-${DB_PORT:-5432}}"
+  export NATIVE_PG_PORT
   APP_ORIGIN="${FRONTEND_ORIGIN:-http://localhost:$WEB_PORT}"
   # The web app proxies /api, /ws, /uploads server-side (apps/web/next.config.ts),
   # so the frontend process needs to know where the backend is at build AND run
@@ -436,13 +451,14 @@ db_native_ensure() {
     initdb_bin="$(dirname "$pgctl")/initdb"
     [ -x "$initdb_bin" ] || fail "initdb not found next to $pgctl"
     "$initdb_bin" -D "$PGDATA_DIR" -U "$DB_USER" --auth=md5 >/dev/null || fail "initdb failed"
+    # 9>&- keeps the run lock out of the postmaster; see launch().
     "$pgctl" -D "$PGDATA_DIR" -l "$LOG_DIR/postgres.log" \
-      -o "-p $NATIVE_PG_PORT -c listen_addresses=127.0.0.1" start >/dev/null
+      -o "-p $NATIVE_PG_PORT -c listen_addresses=127.0.0.1" start >/dev/null 9>&-
     ok "cluster initialised on 127.0.0.1:$NATIVE_PG_PORT"
   else
     "$pgctl" -D "$PGDATA_DIR" status >/dev/null 2>&1 \
       || "$pgctl" -D "$PGDATA_DIR" -l "$LOG_DIR/postgres.log" \
-         -o "-p $NATIVE_PG_PORT -c listen_addresses=127.0.0.1" start >/dev/null
+         -o "-p $NATIVE_PG_PORT -c listen_addresses=127.0.0.1" start >/dev/null 9>&-
     ok "cluster running on 127.0.0.1:$DB_PORT"
   fi
   db_wait_ready
@@ -506,8 +522,13 @@ launch() {
   local name=$1 dir=$2 pattern=$3; shift 3
   log_rotate "$name"
   mkdir -p "$LOG_DIR" "$RUN_DIR"
+  # 9>&- is load-bearing: fd 9 is the run lock taken by acquire_lock, and a
+  # descriptor inherited by a service outlives the script. The backend and the
+  # frontend would then hold the flock for as long as they run, and every later
+  # start / ensure / stop would block on it until it timed out. Close it in the
+  # subshell so the whole spawned tree starts without it.
   ( cd "$dir" && setsid bash -c 'printf "%s\n" "$$" >"$1"; shift; exec "$@"' \
-      _ "$RUN_DIR/$name.pid" "$@" >>"$LOG_DIR/$name.log" 2>&1 </dev/null & )
+      _ "$RUN_DIR/$name.pid" "$@" >>"$LOG_DIR/$name.log" 2>&1 </dev/null 9>&- & ) 9>&-
   printf '%s\n' "$pattern" >"$RUN_DIR/$name.cmd"
   # The child writes its own pid, so wait for that instead of guessing, and
   # fail loudly when the process dies during startup (bad flag, port taken...).
@@ -835,7 +856,10 @@ start_frontend() {
 # deploy script would hang it).
 NGINX=""
 resolve_nginx_cmd() {
-  local bin cand
+  # bin must start defined: this script runs under `set -u`, and a host with no
+  # nginx binary (the reverse proxy lives in a container) would abort the whole
+  # start instead of taking the "skip the proxy" path below.
+  local bin="" cand
   for cand in /usr/sbin/nginx /usr/local/nginx/sbin/nginx /usr/local/sbin/nginx; do
     [ -x "$cand" ] && { bin="$cand"; break; }
   done
@@ -867,7 +891,7 @@ nginx_reload() {
   if pgrep -x nginx >/dev/null 2>&1; then
     if $NGINX -s reload; then ok "nginx reloaded"; else warn "nginx reload failed"; fi
   else
-    if $NGINX; then ok "nginx started"; else warn "nginx failed to start"; fi
+    if $NGINX 9>&-; then ok "nginx started"; else warn "nginx failed to start"; fi
   fi
   # Report on the hostnames this deployment is supposed to answer for: the API
   # origin always, the app origin only when the web runs on this host.
@@ -891,27 +915,45 @@ nginx_reload() {
   done
 }
 
+# `multica daemon status` exits 0 whether or not a daemon is running: it
+# reports the state on stdout and returns nil either way. Testing its exit code
+# therefore reports a stopped daemon as running, and at boot that made
+# start_daemon skip the start entirely — the machine came up with the app but
+# no CLI runtime. Read the reported state instead.
+# The JSON is slurped first and whitespace is squeezed out before matching:
+# `multica ... | grep -q` would hand grep the closing brace as a SIGPIPE, and
+# under `set -o pipefail` that failing left turn makes a running daemon read as
+# stopped. The bigger the status payload grows, the likelier that pipe is.
+daemon_running() {
+  local out
+  out="$("$CLI_DEST" daemon status --output json 2>/dev/null | tr -d '[:space:]')" || return 1
+  case "$out" in
+    *'"status":"running"'*|*'"status":"starting"'*) return 0 ;;
+  esac
+  return 1
+}
+
 start_daemon() {
   step "service: multica daemon"
   [ -x "$CLI_DEST" ] || { warn "CLI not installed at $CLI_DEST; skipping daemon"; return 0; }
-  if "$CLI_DEST" daemon status >/dev/null 2>&1; then
+  if daemon_running; then
     # The daemon is the CLI agent runtime: restarting it interrupts whatever it
     # is running, so a plain `start` leaves it alone. Opt in explicitly.
     if [ "${MULTICA_RESTART_DAEMON:-0}" = "1" ]; then
-      "$CLI_DEST" daemon restart >>"$LOG_DIR/daemon.log" 2>&1 || warn "daemon restart failed (see $LOG_DIR/daemon.log)"
+      "$CLI_DEST" daemon restart 9>&- >>"$LOG_DIR/daemon.log" 2>&1 || warn "daemon restart failed (see $LOG_DIR/daemon.log)"
       ok "daemon restarted with the new build"
     else
       ok "daemon already running (left as-is; MULTICA_RESTART_DAEMON=1 to reload it)"
     fi
   else
-    "$CLI_DEST" daemon start >>"$LOG_DIR/daemon.log" 2>&1 || warn "daemon start failed (see $LOG_DIR/daemon.log)"
+    "$CLI_DEST" daemon start 9>&- >>"$LOG_DIR/daemon.log" 2>&1 || warn "daemon start failed (see $LOG_DIR/daemon.log)"
     ok "daemon started"
   fi
 }
 
 stop_daemon() {
   [ -x "$CLI_DEST" ] || return 0
-  "$CLI_DEST" daemon status >/dev/null 2>&1 || return 0
+  daemon_running || return 0
   "$CLI_DEST" daemon stop >>"$LOG_DIR/daemon.log" 2>&1 || warn "daemon stop failed"
   ok "daemon stopped"
 }
@@ -1153,14 +1195,14 @@ cmd_ensure() {
   fi
 
   if [ -x "$CLI_DEST" ]; then
-    if "$CLI_DEST" daemon status >/dev/null 2>&1; then
+    if daemon_running; then
       dim "daemon: running"
     else
       # Only reachable outside a daemon-hosted task: the CLI refuses to start a
       # second daemon from inside one, and a task can only exist while the
       # daemon it runs on is alive.
       warn "CLI daemon is down — starting it"
-      if "$CLI_DEST" daemon start >>"$LOG_DIR/daemon.log" 2>&1; then
+      if "$CLI_DEST" daemon start 9>&- >>"$LOG_DIR/daemon.log" 2>&1; then
         ok "daemon started"
         fixed=1
       else
@@ -1209,7 +1251,7 @@ cmd_status() {
   else
     info "$(printf '%-9s' nginx) not running"
   fi
-  if [ -x "$CLI_DEST" ] && "$CLI_DEST" daemon status >/dev/null 2>&1; then
+  if [ -x "$CLI_DEST" ] && daemon_running; then
     info "$(printf '%-9s' daemon) running"
   else
     info "$(printf '%-9s' daemon) stopped"
@@ -1248,57 +1290,193 @@ cmd_daemon() {
   esac
 }
 
-# Boot + self-heal wiring. The unit files live in the repo (deploy/systemd) and
-# are copied into /etc/systemd/system, so a re-clone can re-apply them.
-install_units() {
-  local src="$ROOT/deploy/systemd" unit
-  [ -d "$src" ] || fail "missing unit source directory $src"
-  have sudo || fail "sudo is required to install systemd units"
-  mkdir -p "$SYSTEMD_DIR"
-  for unit in multica.service multica-ensure.service multica-ensure.timer; do
-    [ -f "$src/$unit" ] || fail "missing $src/$unit"
-    sudo -n install -m 0644 "$src/$unit" "$SYSTEMD_DIR/$unit"
-    ok "installed $SYSTEMD_DIR/$unit"
+# Boot + self-heal wiring. The unit files live in the repo (deploy/systemd) as
+# templates and are rendered at install time, so a re-clone can re-apply units
+# that actually match this machine.
+UNIT_TEMPLATES="multica.service multica-ensure.service multica-ensure.timer"
+
+# The PATH a unit starts with. systemd hands a unit a fixed minimal PATH, and
+# everything this script owns lives outside the system dirs: the CLI in
+# ~/.local/bin, the Go toolchain in ~/go/go/bin, Node under ~/.nvm. Without all
+# three a boot unit cannot find the daemon it is meant to start, and a cold
+# rebuild cannot find the toolchain it needs.
+unit_path() {
+  local acc="" dir
+  for dir in "$(dirname "$CLI_DEST")" "$GO_HOME/bin" "$(nvm_node_bin)"; do
+    [ -n "$dir" ] && [ -d "$dir" ] || continue
+    case ":$acc:" in *":$dir:"*) continue ;; esac
+    acc="${acc:+$acc:}$dir"
   done
-  sudo -n systemctl daemon-reload
+  printf '%s' "${acc:+$acc:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+}
+
+unit_escape() { printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'; }
+
+# systemctl answers a unit it cannot find with a sentence on stderr and nothing
+# on stdout; keep the first stdout line and never let it run long here.
+unit_state() {
+  local out
+  out="$("$@" 2>/dev/null | head -n1)" || true
+  [ -n "$out" ] || out="unknown"
+  printf '%s' "$out"
+}
+
+# Render one unit template into $3. $2 is the scope: a "user" unit is installed
+# into ~/.config/systemd/user, where systemd rejects the system-only parts of
+# these files — a User=/Group= pair, a dependency on the system docker.service,
+# and multi-user.target as the boot target — so those are rewritten or dropped
+# instead of producing a unit that enables cleanly and never starts.
+# Only directives are rewritten, never comments: the templates explain the
+# placeholders by name, and expanding those names into this machine's layout
+# would turn the explanation into noise.
+render_unit() {
+  local src=$1 scope=$2 out=$3 no_comment='/^[[:space:]]*#/!'
+  sed -e "$no_comment"'s|@ROOT@|'$(unit_escape "$ROOT")'|g' \
+      -e "$no_comment"'s|@HOME@|'$(unit_escape "$HOME")'|g' \
+      -e "$no_comment"'s|@USER@|'$(unit_escape "$(id -un)")'|g' \
+      -e "$no_comment"'s|@GROUP@|'$(unit_escape "$(id -gn)")'|g' \
+      -e "$no_comment"'s|@PATH@|'$(unit_escape "$(unit_path)")'|g' \
+      "$src" >"$out"
+  if [ "$scope" = "user" ]; then
+    # The user manager has no multi-user.target: `systemctl --user enable`
+    # would still link the unit, and nothing would ever want it.
+    sed -i -e "$no_comment"'{s/^WantedBy=multi-user\.target$/WantedBy=default.target/;}' "$out"
+    sed -i -e "$no_comment"'{/^User=/d; /^Group=/d; s/ *docker\.service//;}' "$out"
+  fi
+  # A placeholder this renderer does not know about would reach systemd as a
+  # literal path and fail at boot, not at install time, so refuse it now. Only
+  # directives count: the templates name the placeholders in their comments.
+  local leftover
+  leftover="$(grep -v '^[[:space:]]*#' "$out" | grep -o '@[A-Z_]*@' | sort -u | tr '\n' ' ' || true)"
+  [ -n "$leftover" ] && fail "$src still has unrendered placeholders: $leftover"
+  return 0
+}
+
+# Render every template into a scratch dir; the caller installs the results.
+render_units() {
+  local scope=$1 src="$ROOT/deploy/systemd" out="$2" unit
+  [ -d "$src" ] || fail "missing unit source directory $src"
+  for unit in $UNIT_TEMPLATES; do
+    [ -f "$src/$unit" ] || fail "missing $src/$unit"
+    render_unit "$src/$unit" "$scope" "$out/$unit"
+  done
+}
+
+install_units() {
+  local scope=$1 unit tmp
+  tmp="$(mktemp -d)"
+  render_units "$scope" "$tmp"
+  if [ "$scope" = "user" ]; then
+    # Linger first: without it the user manager only exists while somebody is
+    # logged in, so an "enabled" user unit still never runs at boot — which is
+    # exactly the silent failure this command exists to prevent.
+    if have loginctl && loginctl enable-linger "$(id -un)" >/dev/null 2>&1; then
+      ok "linger enabled (units run without a login session)"
+    else
+      warn "could not enable linger; the user units need a login session to start"
+    fi
+    mkdir -p "$USER_UNIT_DIR"
+    for unit in $UNIT_TEMPLATES; do
+      install -m 0644 "$tmp/$unit" "$USER_UNIT_DIR/$unit"
+      ok "installed $USER_UNIT_DIR/$unit"
+    done
+    systemctl --user daemon-reload
+  else
+    have sudo || fail "sudo is required to install systemd units"
+    mkdir -p "$SYSTEMD_DIR"
+    for unit in $UNIT_TEMPLATES; do
+      sudo -n install -m 0644 "$tmp/$unit" "$SYSTEMD_DIR/$unit"
+      ok "installed $SYSTEMD_DIR/$unit"
+    done
+    sudo -n systemctl daemon-reload
+  fi
   ok "systemd units reloaded"
+  rm -rf "$tmp"
+}
+
+# Which scope to install into when the caller did not say. A host that already
+# has user units keeps using them; everything else gets the /etc/systemd/system
+# units the script has always installed.
+autostart_scope() {
+  if [ -f "$USER_UNIT_DIR/multica.service" ]; then echo user; else echo system; fi
 }
 
 cmd_autostart() {
-  case "${1:-status}" in
+  local action="${1:-status}" scope
+  shift || true
+  case "${1:-}" in
+    user|system) scope="$1" ;;
+    "") scope="${MULTICA_SYSTEMD_SCOPE:-$(autostart_scope)}" ;;
+    *) fail "usage: $0 autostart $action [user|system]" ;;
+  esac
+  case "$action" in
     on|install|enable)
-      step "autostart: boot units"
-      install_units
+      step "autostart: boot units ($scope)"
+      install_units "$scope"
       # enable only, never start: a boot unit that also starts now would fight
       # the process this script is already running from.
-      sudo -n systemctl enable multica.service multica-ensure.timer >/dev/null
-      ok "enabled multica.service + multica-ensure.timer (take effect on next boot)"
-      dim "run 'sudo systemctl start multica.service' to wire it up immediately"
+      if [ "$scope" = "user" ]; then
+        systemctl --user enable multica.service multica-ensure.timer >/dev/null
+        ok "enabled multica.service + multica-ensure.timer (take effect on next boot)"
+        dim "run 'systemctl --user start multica.service' to wire it up immediately"
+      else
+        sudo -n systemctl enable multica.service multica-ensure.timer >/dev/null
+        ok "enabled multica.service + multica-ensure.timer (take effect on next boot)"
+        dim "run 'sudo systemctl start multica.service' to wire it up immediately"
+      fi
       ;;
     off|uninstall)
-      step "autostart: removing boot units"
-      have sudo || fail "sudo is required"
-      sudo -n systemctl disable --now multica-ensure.timer >/dev/null 2>&1 || true
-      sudo -n systemctl disable multica.service >/dev/null 2>&1 || true
-      sudo -n rm -f "$SYSTEMD_DIR/multica.service" "$SYSTEMD_DIR/multica-ensure.service" \
-        "$SYSTEMD_DIR/multica-ensure.timer"
-      sudo -n systemctl daemon-reload
+      step "autostart: removing boot units ($scope)"
+      if [ "$scope" = "user" ]; then
+        systemctl --user disable --now multica-ensure.timer >/dev/null 2>&1 || true
+        systemctl --user disable multica.service >/dev/null 2>&1 || true
+        rm -f "$USER_UNIT_DIR/multica.service" "$USER_UNIT_DIR/multica-ensure.service" \
+          "$USER_UNIT_DIR/multica-ensure.timer"
+        systemctl --user daemon-reload
+      else
+        have sudo || fail "sudo is required"
+        sudo -n systemctl disable --now multica-ensure.timer >/dev/null 2>&1 || true
+        sudo -n systemctl disable multica.service >/dev/null 2>&1 || true
+        sudo -n rm -f "$SYSTEMD_DIR/multica.service" "$SYSTEMD_DIR/multica-ensure.service" \
+          "$SYSTEMD_DIR/multica-ensure.timer"
+        sudo -n systemctl daemon-reload
+      fi
       ok "boot units removed (the running app was left alone)"
       ;;
     status|"")
       step "autostart: boot units"
       if have systemctl; then
+        # Both scopes are reported: a half-installed pair (system units present,
+        # user units active) is exactly the state that looks fine until a reboot.
         for unit in multica.service multica-ensure.timer; do
-          printf '    %-24s enabled=%-10s active=%s\n' "$unit" \
-            "$(systemctl is-enabled "$unit" 2>/dev/null || echo no)" \
-            "$(systemctl is-active "$unit" 2>/dev/null || echo inactive)"
+          printf '    %-9s %-24s enabled=%-10s active=%s\n' "system" "$unit" \
+            "$(unit_state systemctl is-enabled "$unit")" \
+            "$(unit_state systemctl is-active "$unit")"
+          printf '    %-9s %-24s enabled=%-10s active=%s\n' "user" "$unit" \
+            "$(unit_state systemctl --user is-enabled "$unit")" \
+            "$(unit_state systemctl --user is-active "$unit")"
         done
+        printf '    %-9s %s\n' "linger" \
+          "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || echo '?')"
       else
         warn "no systemctl on this host; boot autostart is not available"
       fi
-      dim "unit source: $ROOT/deploy/systemd"
+      dim "unit templates: $ROOT/deploy/systemd"
       ;;
-    *) fail "usage: $0 autostart on|off|status" ;;
+    render|preview)
+      # Print what an install would write, without writing it. The templates are
+      # rendered from this machine's layout, so this is the only way to check
+      # them before a reboot depends on them.
+      local tmp
+      tmp="$(mktemp -d)"
+      render_units "$scope" "$tmp"
+      for unit in $UNIT_TEMPLATES; do
+        printf '\n# ===== %s (%s scope) =====\n' "$unit" "$scope"
+        cat "$tmp/$unit"
+      done
+      rm -rf "$tmp"
+      ;;
+    *) fail "usage: $0 autostart on|off|status|render [user|system]" ;;
   esac
 }
 

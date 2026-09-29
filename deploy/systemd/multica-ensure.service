@@ -1,20 +1,27 @@
 # Self-heal check: start only what is down. Installed by
 # `./start.sh autostart on` from deploy/systemd/multica-ensure.service.
+#
+# TEMPLATE, not a ready-to-install unit: @ROOT@/@USER@/@PATH@ are rendered at
+# install time. See multica.service for the full placeholder set.
 [Unit]
 Description=Multica self-heal check (start what is down)
-Documentation=file:///home/zhangjh/multica/start.sh
+Documentation=file://@ROOT@/start.sh
+# A user-scope install drops the User=/Group= pair below.
 After=network-online.target multica.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=zhangjh
-Group=zhangjh
-WorkingDirectory=/home/zhangjh/multica
-Environment=HOME=/home/zhangjh
+# Dropped when this is installed as a user unit.
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@ROOT@
+Environment=HOME=@HOME@
 Environment=SHELL=/bin/bash
-Environment=PATH=/home/zhangjh/.local/bin:/home/zhangjh/go/go/bin:/home/zhangjh/.nvm/versions/node/v24.14.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=/home/zhangjh/multica/start.sh ensure
+# Same reason as in multica.service: the timer runs the same script from a
+# non-interactive unit, so it needs the CLI / Go / Node dirs on PATH.
+Environment=PATH=@PATH@
+ExecStart=@ROOT@/start.sh ensure
 TimeoutStartSec=300
 StandardOutput=journal
 StandardError=journal
