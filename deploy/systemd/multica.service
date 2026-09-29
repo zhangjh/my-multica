@@ -1,5 +1,10 @@
 # Multica native backend, installed from deploy/systemd/multica.service
 #
+# TEMPLATE, not a ready-to-install unit. `./start.sh autostart on` renders the
+# @PLACEHOLDER@ values below (checkout, user, home, PATH) and installs the
+# result. Committing the rendered values instead would pin the unit to one
+# machine's layout and go stale the next time Node or the Go toolchain moves.
+#
 # Boot behaviour: runs the full deploy path once (build when the checkout moved,
 # apply migrations, start the backend, reload nginx, start the CLI daemon when
 # it is not already up). Type=oneshot because start.sh supervises the services
@@ -9,23 +14,31 @@
 # The self-heal timer (multica-ensure.timer) restarts whatever dies later.
 [Unit]
 Description=Multica native backend (start.sh)
-Documentation=file:///home/zhangjh/multica/start.sh
+Documentation=file://@ROOT@/start.sh
 After=network-online.target docker.service
 Wants=network-online.target docker.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-User=zhangjh
-Group=zhangjh
-WorkingDirectory=/home/zhangjh/multica
+# Dropped when this is installed as a user unit: systemd refuses a user unit
+# that names a User=/Group=.
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@ROOT@
 # start.sh sources ~/.nvm for node and uses sudo -n for `nginx -s reload`;
 # systemd gives neither a login shell nor a TTY, so both are provided here.
-Environment=HOME=/home/zhangjh
+Environment=HOME=@HOME@
 Environment=SHELL=/bin/bash
-Environment=PATH=/home/zhangjh/.local/bin:/home/zhangjh/go/go/bin:/home/zhangjh/.nvm/versions/node/v24.14.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=/home/zhangjh/multica/start.sh start
-ExecStop=/home/zhangjh/multica/start.sh stop
+# systemd hands a unit a fixed, minimal PATH. Without this line the boot unit
+# cannot find the CLI it is supposed to start, the Go toolchain it rebuilds the
+# backend with, or the Node it builds the frontend with — and start.sh silently
+# degrades to whatever the system dirs happen to hold. Rendered at install time
+# from the machine that installs it; start.sh re-globs ~/.nvm/versions/node/*/bin
+# itself, so a Node upgrade does not need the unit re-installed.
+Environment=PATH=@PATH@
+ExecStart=@ROOT@/start.sh start
+ExecStop=@ROOT@/start.sh stop
 # A cold boot may have to build the Go backend and the Next.js frontend.
 TimeoutStartSec=1800
 TimeoutStopSec=180
