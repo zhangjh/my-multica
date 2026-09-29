@@ -266,10 +266,13 @@ func ListModels(ctx context.Context, providerType string, runtimeCmd Command) (C
 		})
 	case "qwen":
 		// Qwen Code has no `models list` subcommand either, so dynamic
-		// discovery is impossible and the picker is served a static catalog —
-		// the same shape Gemini uses. Manual entry stays available for the
-		// account-specific ids a Token/Coding Plan subscriber reaches (see
-		// qwenStaticModels).
+		// CLI discovery is impossible and the picker is served a static
+		// catalog — the same shape Gemini uses. This is the built-ins-only
+		// baseline: the daemon merges the custom models from Qwen Code's own
+		// user settings (modelProviders + the selected model) on top, in
+		// internal/daemon/qwen_models.go, so the picker lists what a
+		// `qwen --model <id>` on that host actually accepts. Manual entry
+		// stays available for ids neither source knows (see qwenStaticModels).
 		return Catalog{Models: qwenStaticModels()}, nil
 	case "qwenpaw":
 		// QwenPaw's model selection is unsupported (session/set_model

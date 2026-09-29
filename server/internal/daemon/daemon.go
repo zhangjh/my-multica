@@ -4818,6 +4818,26 @@ func (d *Daemon) handleModelList(ctx context.Context, rt Runtime, requestID stri
 		}
 	}
 
+	// Qwen Code's ListModels catalog covers only the built-in ids (the CLI has
+	// no models command to enumerate), but everything its own /model picker
+	// offers lives in the user settings the launched `qwen` inherits this
+	// daemon's HOME to read. Merging here keeps the picker honest about what
+	// `qwen --model <id>` on this host actually accepts, including the
+	// account-specific ids a Token/Coding Plan subscriber reaches.
+	if rt.Provider == "qwen" {
+		if home, homeErr := os.UserHomeDir(); homeErr == nil {
+			customModels, settingsDefaultID, cfgErr := loadQwenConfiguredModels(home)
+			if cfgErr != nil {
+				d.logger.Warn("Qwen custom model discovery failed",
+					"runtime_id", rt.ID, "path", qwenUserSettingsPath(home), "error", cfgErr)
+			} else if len(customModels) > 0 || settingsDefaultID != "" {
+				models = mergeQwenModelCatalogs(models, customModels, settingsDefaultID)
+				d.logger.Info("Qwen model discovery used user-configured providers",
+					"runtime_id", rt.ID, "path", qwenUserSettingsPath(home), "custom_count", len(customModels))
+			}
+		}
+	}
+
 	// Wire format matches handler.ModelEntry. Use a struct (not
 	// map[string]string) so the Default bool and the per-model
 	// Thinking catalog round-trip — without it the UI loses its
