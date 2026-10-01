@@ -2145,7 +2145,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// workspace sync. Both steps live in preflightAuth so the ordering
 	// invariant (renew first) is enforced at one site instead of
 	// scattered into Run, and tests can exercise the failure paths
-	// without the full Run setup.
+	// without the full Run setup. The sync retries a server that is still
+	// coming up, so "starting" here can now also mean "waiting for the
+	// server" — which is why the health port is bound above.
 	if err := d.preflightAuth(ctx); err != nil {
 		return err
 	}
@@ -4019,13 +4021,110 @@ const DefaultTokenRenewalInterval = 3 * 24 * time.Hour
 // register runtimes once one appears.
 func (d *Daemon) preflightAuth(ctx context.Context) error {
 	d.tryRenewToken(ctx)
-	err := d.syncWorkspacesFromAPI(ctx, false)
+	err := d.syncWorkspacesFromAPIRetrying(ctx)
 	if d.startupMayProceedWithoutRuntimes(err) {
 		d.logger.Warn("starting with no runtimes registered: an automatic DSH runtime profile install is still running; " +
 			"the runtime registers when it finishes")
 		return nil
 	}
 	return err
+}
+
+// Preflight sync retry budget. The daemon is routinely started by the same
+// script or unit that just started the server it depends on, so the server it
+// is preflighting against is often still coming up — and when the configured
+// URL is a public one, its edge can lag the origin by minutes after a reboot.
+// Every other part of the daemon is built to survive exactly that (the task
+// wakeup socket reconnects indefinitely, the workspace sync backs off, the
+// terminal callbacks retry), so treating the same outage as fatal at startup
+// left a self-hosted box with no runtime at all until something restarted the
+// daemon by hand.
+//
+// The budget is bounded rather than open-ended on purpose: start.sh's
+// daemon_running also accepts status:"starting", so a daemon parked in this
+// loop counts as up to the self-heal timer and is left alone, and the timer
+// remains the outer backstop for an outage that outlives the window.
+//
+// A var, not a const, so tests can shrink the window instead of spending five
+// minutes proving the loop gives up.
+var preflightSyncMaxWait = 5 * time.Minute
+
+const (
+	preflightSyncRetryInitial  = 2 * time.Second
+	preflightSyncRetryMaxDelay = 30 * time.Second
+)
+
+// syncWorkspacesFromAPIRetrying runs the startup workspace sync, retrying
+// while — and only while — shouldRetryStartupSync says the failure is one the
+// server is likely to stop producing on its own.
+func (d *Daemon) syncWorkspacesFromAPIRetrying(ctx context.Context) error {
+	started := time.Now()
+	deadline := started.Add(preflightSyncMaxWait)
+	for attempt := 0; ; attempt++ {
+		err := d.syncWorkspacesFromAPI(ctx, false)
+		if !d.shouldRetryStartupSync(ctx, err) {
+			return err
+		}
+		delay := preflightSyncRetryDelay(attempt)
+		if time.Now().Add(delay).After(deadline) {
+			return err
+		}
+		d.logger.Warn("initial workspace sync failed; the server may still be starting; retrying",
+			"error", err, "retry_in", delay, "waited", time.Since(started).Round(time.Second))
+		if sleepErr := retrySleep(ctx, delay); sleepErr != nil {
+			return err
+		}
+	}
+}
+
+// shouldRetryStartupSync decides whether a failed startup workspace sync earns
+// another attempt. The order of the cases is the contract, so keep it.
+//
+// Transience is the last resort, not the first test, and that ordering is the
+// point: isTransientError reads any non-HTTP error as transient, which is right
+// for the callbacks that retry it but wrong here. A rejected PAT has to fail
+// fast, because failing fast is what surfaces the user-actionable "run multica
+// login" WARN while the renewal loop is still deciding whether to report it —
+// retrying it would trade that hint for a five-minute stall and the same error.
+//
+// The DSH install bootstrap is excluded for the opposite reason: it is a local
+// outcome that no amount of waiting can change, and its fate is not this loop's
+// to decide — startupMayProceedWithoutRuntimes is what lets that startup
+// continue, so the loop hands the error back untouched instead of looping on it.
+// Excluding the sentinel rather than startupMayProceedWithoutRuntimes also
+// covers the same failure with no install running, so a genuinely empty machine
+// — where the answer is not coming — fails fast instead of idling out the
+// budget.
+func (d *Daemon) shouldRetryStartupSync(ctx context.Context, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case ctx.Err() != nil:
+		// Shutting down mid-preflight, not a server problem.
+		return false
+	case errors.Is(err, errNoWorkspaceRuntimesRegistered):
+		return false
+	default:
+		return isTransientError(err)
+	}
+}
+
+// preflightSyncRetryDelay is the backoff between startup sync attempts. Same
+// shape as workspaceSyncBackoff: short enough that a server which is already
+// up pays nothing, saturating so a long outage is polled at a steady rate
+// instead of drifting out to the sync interval.
+func preflightSyncRetryDelay(attempt int) time.Duration {
+	delay := preflightSyncRetryInitial
+	for i := 0; i < attempt; i++ {
+		if delay >= preflightSyncRetryMaxDelay/2 {
+			return preflightSyncRetryMaxDelay
+		}
+		delay *= 2
+	}
+	if delay > preflightSyncRetryMaxDelay {
+		return preflightSyncRetryMaxDelay
+	}
+	return delay
 }
 
 // startupMayProceedWithoutRuntimes reports whether a startup that registered
@@ -4039,9 +4138,12 @@ func (d *Daemon) preflightAuth(ctx context.Context) error {
 // The feature exists precisely for that host, so on it the feature could never
 // once complete.
 //
-// Nothing else is forgiven. An unreachable server, a rejected token, and a
-// genuinely empty machine all still fail startup, because for those the daemon
-// has no reason to believe the answer is coming.
+// Nothing else is forgiven, and an unreachable server is deliberately not
+// excused here: it is handled one level up by syncWorkspacesFromAPIRetrying,
+// which retries it for a bounded window on the strength of the failure's own
+// shape rather than on any local state. A rejected token and a genuinely empty
+// machine still fail startup, because for those the daemon has no reason to
+// believe the answer is coming.
 func (d *Daemon) startupMayProceedWithoutRuntimes(err error) bool {
 	return errors.Is(err, errNoWorkspaceRuntimesRegistered) && d.dshInstallInFlight.Load()
 }

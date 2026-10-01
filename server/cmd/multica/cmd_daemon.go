@@ -698,7 +698,11 @@ func runDaemonBackground(cmd *cobra.Command) error {
 	}
 	if !started {
 		if lastStatus == "starting" {
-			fmt.Fprintf(os.Stderr, "Daemon is still starting after %s (agent detection / workspace sync is taking longer than expected). Check logs:\n  %s\n", startupTimeout, logPath)
+			// Alive but not ready. Since the daemon now waits out a server that
+			// has not finished coming up, this is an ordinary state on a host
+			// that starts the backend and the daemon together — say so, and
+			// point at the self-heal path rather than implying something broke.
+			fmt.Fprintf(os.Stderr, "Daemon is still starting after %s. It is alive and will keep retrying while the server at %s becomes reachable; if it never reaches ready, run `%s daemon status` and check %s.\n", startupTimeout, resolveDaemonServerURL(cmd, profile), cmd.CommandPath(), logPath)
 		} else {
 			fmt.Fprintf(os.Stderr, "Daemon may not have started successfully. Check logs:\n  %s\n  %s (crash output)\n", logPath, errLogPath)
 		}

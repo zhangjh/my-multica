@@ -76,6 +76,7 @@
   "scripts": [
     "scripts/generate-reserved-slugs.mjs",
     "scripts/selfhost-config.test.sh",
+    "scripts/selfhost-daemon-supervision.test.sh",
     "scripts/drop-database.sh",
     "scripts/remove-worktree.sh",
     "scripts/worktree-db.test.sh",
@@ -95,6 +96,8 @@
     "scripts/entrypoint.test.sh",
     "scripts/makefile-build.test.sh",
     "deploy/helm/**",
+    "deploy/systemd/**",
+    "start.sh",
     "docker/entrypoint.sh",
     ".env.example",
     "docker-compose.selfhost.yml",

@@ -12,6 +12,15 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# Required, and not a copy-paste from multica.service: this unit starts the CLI
+# daemon, and without RemainAfterExit systemd tears the unit down the moment
+# `start.sh ensure` exits 0 — SIGTERMing every process still in the control
+# group. `multica daemon start` detaches with Setsid, which moves the child to
+# a new session and process group but leaves it in this unit's cgroup, so the
+# daemon it had just reported as started was killed a few hundred milliseconds
+# later. The self-heal timer then restarted it every tick, so recovery never
+# stuck. Drop this line and the daemon dies with the unit again.
+RemainAfterExit=yes
 # Dropped when this is installed as a user unit.
 User=@USER@
 Group=@GROUP@
