@@ -940,14 +940,24 @@ start_daemon() {
     # The daemon is the CLI agent runtime: restarting it interrupts whatever it
     # is running, so a plain `start` leaves it alone. Opt in explicitly.
     if [ "${MULTICA_RESTART_DAEMON:-0}" = "1" ]; then
-      "$CLI_DEST" daemon restart 9>&- >>"$LOG_DIR/daemon.log" 2>&1 || warn "daemon restart failed (see $LOG_DIR/daemon.log)"
-      ok "daemon restarted with the new build"
+      if "$CLI_DEST" daemon restart 9>&- >>"$LOG_DIR/daemon.log" 2>&1; then
+        ok "daemon restarted with the new build"
+      else
+        warn "daemon restart failed (see $LOG_DIR/daemon.log)"
+        return 1
+      fi
     else
       ok "daemon already running (left as-is; MULTICA_RESTART_DAEMON=1 to reload it)"
     fi
-  else
-    "$CLI_DEST" daemon start 9>&- >>"$LOG_DIR/daemon.log" 2>&1 || warn "daemon start failed (see $LOG_DIR/daemon.log)"
+  elif "$CLI_DEST" daemon start 9>&- >>"$LOG_DIR/daemon.log" 2>&1; then
     ok "daemon started"
+  else
+    # Report only what happened. This branch used to warn and then print
+    # "✓ daemon started" regardless, and still returned 0, so a boot that came
+    # up with no agent runtime at all was logged — and reported to systemd by
+    # multica.service — as a successful start.
+    warn "daemon start failed (see $LOG_DIR/daemon.log); this host runs no agent until it does"
+    return 1
   fi
 }
 
@@ -1043,9 +1053,14 @@ cmd_start() {
     web_skip_notice
   fi
   nginx_reload
-  start_daemon
+  # A daemon that could not be started must not be reported as a successful
+  # `start` — the status block below still prints, so the operator can see what
+  # did come up, but the run's exit status reports the missing runtime.
+  local daemon_rc=0
+  start_daemon || daemon_rc=$?
   echo
   cmd_status
+  return "$daemon_rc"
 }
 
 cmd_stop() {
