@@ -607,6 +607,11 @@ db_native_ensure() {
   fi
   [ -n "$pgctl" ] || fail "no pg_ctl found; set MULTICA_PG_CTL or install PostgreSQL >= 15
        (migrations use NULLS NOT DISTINCT, which needs 15+; upstream ships pg17)"
+  # The unix socket (and its lock file) must live in our own data dir:
+  # /var/run/postgresql belongs to the postgres OS user and is not writable
+  # for an unprivileged cluster owner.
+  mkdir -p "$RUN_DIR"
+  local pg_opts="-p $NATIVE_PG_PORT -c listen_addresses=127.0.0.1 -c unix_socket_directories=$RUN_DIR"
   if [ ! -f "$PGDATA_DIR/PG_VERSION" ]; then
     # Auto-bootstrap for native mode to make setup easier
     if [ "$DB_MODE" = "native" ] || [ "$PG_BOOTSTRAP" = "1" ]; then
@@ -626,7 +631,7 @@ db_native_ensure() {
       fi
       # 9>&- keeps the run lock out of the postmaster; see launch().
       "$pgctl" -D "$PGDATA_DIR" -l "$LOG_DIR/postgres.log" \
-        -o "-p $NATIVE_PG_PORT -c listen_addresses=127.0.0.1" start >/dev/null 9>&- \
+        -o "$pg_opts" start >/dev/null 9>&- \
         || fail "pg_ctl could not start the new cluster (is port $NATIVE_PG_PORT taken?) — see $LOG_DIR/postgres.log"
       ok "cluster initialised on 127.0.0.1:$NATIVE_PG_PORT"
     else
@@ -638,7 +643,7 @@ db_native_ensure() {
   else
     "$pgctl" -D "$PGDATA_DIR" status >/dev/null 2>&1 \
       || "$pgctl" -D "$PGDATA_DIR" -l "$LOG_DIR/postgres.log" \
-         -o "-p $NATIVE_PG_PORT -c listen_addresses=127.0.0.1" start >/dev/null 9>&- \
+         -o "$pg_opts" start >/dev/null 9>&- \
       || fail "pg_ctl could not start the cluster (is port $NATIVE_PG_PORT taken?) — see $LOG_DIR/postgres.log"
     ok "cluster running on 127.0.0.1:$DB_PORT"
   fi
