@@ -141,10 +141,20 @@ tcp_ready() { (exec 3<>"/dev/tcp/$1/$2") 2>/dev/null; }
 PSQL=""
 resolve_psql() {
   local cand
-  for cand in "${MULTICA_PSQL:-}" /usr/lib/postgresql/*/bin/psql /usr/pgsql-*/bin/psql /usr/local/pgsql/bin/psql; do
+  for cand in "${MULTICA_PSQL:-}" "${PGHOME:-/nonexistent}/bin/psql" "$HOME/apps/multica-pg/bin/psql" \
+              "${MULTICA_PG_HOME:-/nonexistent}/bin/psql" "/opt/multica-pg/bin/psql" \
+              /usr/lib/postgresql/*/bin/psql /usr/pgsql-*/bin/psql /usr/local/pgsql/bin/psql; do
     [ -n "$cand" ] && [ -x "$cand" ] && { PSQL="$cand"; break; }
   done
   [ -n "$PSQL" ] || PSQL="$(command -v psql 2>/dev/null || true)"
+  if [ -z "$PSQL" ] && [ -d "$HOME/apps/multica-pg/bin" ]; then
+    export PATH="$HOME/apps/multica-pg/bin:$PATH"
+    PSQL="$HOME/apps/multica-pg/bin/psql"
+  fi
+  if [ -z "$PSQL" ] && [ -d "/opt/multica-pg/bin" ]; then
+    export PATH="/opt/multica-pg/bin:$PATH"
+    PSQL="/opt/multica-pg/bin/psql"
+  fi
   [ -n "$PSQL" ] || return 1
   local psqldir; psqldir="$(dirname "$PSQL")"
   export PATH="$psqldir:$PATH"
@@ -436,25 +446,48 @@ db_native_ensure() {
   step "database (native cluster at $PGDATA_DIR)"
   local pgctl="" initdb_bin cand
   for cand in "${MULTICA_PG_CTL:-}" "${PGHOME:-/nonexistent}/bin/pg_ctl" "$HOME/apps/multica-pg/bin/pg_ctl" \
-              /usr/lib/postgresql/*/bin/pg_ctl /usr/local/pgsql/bin/pg_ctl; do
+              "${MULTICA_PG_HOME:-/nonexistent}/bin/pg_ctl" "/opt/multica-pg/bin/pg_ctl" \
+              /usr/lib/postgresql/*/bin/pg_ctl /usr/pgsql-*/bin/pg_ctl /usr/local/pgsql/bin/pg_ctl; do
     [ -n "$cand" ] && [ -x "$cand" ] && { pgctl="$cand"; break; }
   done
   [ -n "$pgctl" ] || pgctl="$(command -v pg_ctl 2>/dev/null || true)"
+  if [ -z "$pgctl" ] && [ -d "$HOME/apps/multica-pg/bin" ]; then
+    export PATH="$HOME/apps/multica-pg/bin:$PATH"
+    pgctl="$HOME/apps/multica-pg/bin/pg_ctl"
+  fi
+  if [ -z "$pgctl" ] && [ -d "/opt/multica-pg/bin" ]; then
+    export PATH="/opt/multica-pg/bin:$PATH"
+    pgctl="/opt/multica-pg/bin/pg_ctl"
+  fi
   [ -n "$pgctl" ] || fail "no pg_ctl found; set MULTICA_PG_CTL or install PostgreSQL >= 15
        (migrations use NULLS NOT DISTINCT, which needs 15+; upstream ships pg17)"
   if [ ! -f "$PGDATA_DIR/PG_VERSION" ]; then
-    [ "$PG_BOOTSTRAP" = "1" ] || fail "no cluster at $PGDATA_DIR. Create one with:
+    # Auto-bootstrap for native mode to make setup easier
+    if [ "$DB_MODE" = "native" ] || [ "$PG_BOOTSTRAP" = "1" ]; then
+      step "initialising cluster at $PGDATA_DIR"
+      initdb_bin="$(dirname "$pgctl")/initdb"
+      [ -x "$initdb_bin" ] || fail "initdb not found next to $pgctl"
+      local db_pass
+      db_pass="$(url_component "$DB_URL" pass)"
+      if [ -n "$db_pass" ]; then
+        local pwfile
+        pwfile="$(mktemp)"
+        printf '%s' "$db_pass" > "$pwfile"
+        "$initdb_bin" -D "$PGDATA_DIR" -U "$DB_USER" --auth=md5 --pwfile="$pwfile" >/dev/null || { rm -f "$pwfile"; fail "initdb failed"; }
+        rm -f "$pwfile"
+      else
+        "$initdb_bin" -D "$PGDATA_DIR" -U "$DB_USER" --auth=md5 >/dev/null || fail "initdb failed"
+      fi
+      # 9>&- keeps the run lock out of the postmaster; see launch().
+      "$pgctl" -D "$PGDATA_DIR" -l "$LOG_DIR/postgres.log" \
+        -o "-p $NATIVE_PG_PORT -c listen_addresses=127.0.0.1" start >/dev/null 9>&-
+      ok "cluster initialised on 127.0.0.1:$NATIVE_PG_PORT"
+    else
+      fail "no cluster at $PGDATA_DIR. Create one with:
        $(dirname "$pgctl")/initdb -D $PGDATA_DIR -U $DB_USER --auth=md5
        $pgctl -D $PGDATA_DIR -l $LOG_DIR/postgres.log -o '-p $NATIVE_PG_PORT' start
        (or re-run with MULTICA_DB_BOOTSTRAP=1 to let this script run initdb for you)"
-    step "initialising cluster at $PGDATA_DIR"
-    initdb_bin="$(dirname "$pgctl")/initdb"
-    [ -x "$initdb_bin" ] || fail "initdb not found next to $pgctl"
-    "$initdb_bin" -D "$PGDATA_DIR" -U "$DB_USER" --auth=md5 >/dev/null || fail "initdb failed"
-    # 9>&- keeps the run lock out of the postmaster; see launch().
-    "$pgctl" -D "$PGDATA_DIR" -l "$LOG_DIR/postgres.log" \
-      -o "-p $NATIVE_PG_PORT -c listen_addresses=127.0.0.1" start >/dev/null 9>&-
-    ok "cluster initialised on 127.0.0.1:$NATIVE_PG_PORT"
+    fi
   else
     "$pgctl" -D "$PGDATA_DIR" status >/dev/null 2>&1 \
       || "$pgctl" -D "$PGDATA_DIR" -l "$LOG_DIR/postgres.log" \
