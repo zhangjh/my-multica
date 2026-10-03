@@ -71,6 +71,7 @@ NATIVE_PG_PORT="${MULTICA_PG_PORT:-5433}"   # resolved against DATABASE_URL in l
 DB_MODE="${MULTICA_DB_MODE:-auto}"          # auto | container | native | external (re-resolved in load_env)
 AUTO_GO="${MULTICA_AUTO_INSTALL_GO:-1}"
 AUTO_NODE="${MULTICA_AUTO_INSTALL_NODE:-1}"   # 1 = install Node 22 + pnpm privately when missing/too old
+AUTO_APT="${MULTICA_AUTO_INSTALL_APT:-1}"     # 1 = apt/dnf-install missing host tools (make, git, curl, ...)
 LOG_MAX_BYTES="${MULTICA_LOG_MAX_BYTES:-52428800}"   # rotate a service log past 50 MB
 HEALTH_TIMEOUT="${MULTICA_HEALTH_TIMEOUT:-90}"
 SYSTEMD_DIR="${MULTICA_SYSTEMD_DIR:-/etc/systemd/system}"
@@ -332,6 +333,70 @@ install_go_toolchain() {
   mkdir -p "$(dirname "$GO_HOME")"
   mv "$stage" "$GO_HOME"
   ok "Go $want installed ($GO_HOME/bin/go)"
+}
+
+# Install OS packages: "" as root, "sudo" when available, else fail.
+# $@ = package names.
+install_apt_pkgs() {
+  local sudo_cmd=""
+  if [ "$(id -u)" -ne 0 ]; then
+    have sudo || { warn "cannot install packages ($*): not root and sudo is not available"; return 1; }
+    sudo_cmd="sudo"
+  fi
+  local os_id="" os_like=""
+  if [ -f /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    os_id="$(. /etc/os-release; printf '%s' "${ID:-}")"
+    os_like="$(. /etc/os-release; printf '%s' "${ID_LIKE:-}")"
+  fi
+  case " $os_id $os_like " in
+    *" debian "*|*" ubuntu "*)
+      $sudo_cmd apt-get update -qq || { warn "apt-get update failed"; return 1; }
+      DEBIAN_FRONTEND=noninteractive $sudo_cmd apt-get install -y -qq "$@" \
+        || { warn "apt-get install $* failed"; return 1; } ;;
+    *" rhel "*|*" centos "*|*" fedora "*|*" rocky "*|*" alma "*|*" amzn "*)
+      if have dnf; then $sudo_cmd dnf install -y -q "$@"
+      else $sudo_cmd yum install -y -q "$@"; fi \
+        || { warn "package install $* failed"; return 1; } ;;
+    *) warn "unsupported distro for automatic package install (id=$os_id)"; return 1 ;;
+  esac
+  ok "installed: $*"
+}
+
+# Host tools this script shells out to directly (beyond the Go/Node toolchains
+# and PostgreSQL, which have their own ensure_*). They are checked up front so
+# a fresh host fails once here, not once per tool halfway through the run.
+ensure_host_tools() {
+  step "toolchain: host tools"
+  local missing_cmds="" missing_pkgs="" os_id="" t pkg
+  if [ -f /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    os_id="$(. /etc/os-release; printf '%s' "${ID:-} ${ID_LIKE:-}")"
+  fi
+  for t in make git curl tar ss; do
+    have "$t" && continue
+    missing_cmds="$missing_cmds $t"
+    pkg="$t"
+    if [ "$t" = "ss" ]; then
+      case " $os_id " in
+        *" debian "*|*" ubuntu "*) pkg="iproute2" ;;
+        *) pkg="iproute" ;;
+      esac
+    fi
+    missing_pkgs="$missing_pkgs $pkg"
+  done
+  if [ -z "$missing_cmds" ]; then ok "make git curl tar ss present"; return 0; fi
+  warn "missing host tools:$missing_cmds"
+  if [ "${AUTO_APT:-1}" != "1" ]; then
+    # shellcheck disable=SC2086
+    fail "install them yourself (apt-get install$missing_pkgs), or set MULTICA_AUTO_INSTALL_APT=1"
+  fi
+  # shellcheck disable=SC2086
+  install_apt_pkgs $missing_pkgs || fail "could not install:$missing_pkgs"
+  # shellcheck disable=SC2086
+  for t in $missing_cmds; do
+    have "$t" || fail "$t still not found after install"
+  done
 }
 
 ensure_go() {
@@ -1350,14 +1415,18 @@ cmd_start() {
   acquire_lock
   mkdir -p "$LOG_DIR" "$RUN_DIR"
   load_env
-  db_ensure
   if [ "$APP_MODE" = "compose" ]; then
+    db_ensure
     step "deploy: docker compose owns the app process (MULTICA_APP_MODE=compose)"
     dim "image: $(compose config --images 2>/dev/null | grep -i backend | head -1 || echo 'multica-backend:dev')"
     dim "rebuild the image with './start.sh build' when the source moved"
   else
+  # Cheap checks first: host tools and language toolchains before the
+  # (potentially slow) database bring-up, so a fresh host fails fast.
+  ensure_host_tools
   ensure_go
   ensure_node
+  db_ensure
   if needs_build; then
     step "deploy: source changed since the last deploy ($(cat "$MARKER" 2>/dev/null || echo none) -> $(head_commit))"
     deploy
@@ -1428,6 +1497,7 @@ cmd_build() {
     # is installed: a container-only host has no daemon to feed and should not
     # suddenly need a Go toolchain.
     if [ -x "$CLI_DEST" ]; then
+      ensure_host_tools
       ensure_go
       build_backend
       warn "the daemon is still on the previous CLI — reload it with './start.sh daemon restart' (interrupts in-flight tasks)"
@@ -1437,6 +1507,7 @@ cmd_build() {
     dim "note: the web frontend is not part of this image — deploy it separately (see scripts/deploy-web-cloudflare.sh)"
     return 0
   fi
+  ensure_host_tools
   ensure_go
   ensure_node
   deploy
@@ -1889,6 +1960,7 @@ cmd_preflight() {
 cmd_bootstrap() {
   mkdir -p "$LOG_DIR" "$RUN_DIR"
   step "bootstrap"
+  ensure_host_tools
   ensure_go
   ensure_node
   load_env
