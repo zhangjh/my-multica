@@ -273,26 +273,39 @@ resolve_go() {
 }
 
 install_go_toolchain() {
-  local want=$1 arch tarball base tmp want_sha got_sha stage
+  local want=$1 arch tarball base sha_base tmp want_sha got_sha stage
   case "$(uname -m)" in
     x86_64|amd64) arch=amd64 ;;
     aarch64|arm64) arch=arm64 ;;
     *) fail "unsupported architecture $(uname -m) for the Go toolchain" ;;
   esac
   base="${MULTICA_GO_MIRROR:-https://golang.google.cn/dl}"
+  # Checksums are tiny and mirror-independent. The China mirror serves
+  # tarballs fine but answers .sha256 requests with an HTML page (HTTP 200),
+  # so take the checksum from the official host unless overridden.
+  sha_base="${MULTICA_GO_SHA_MIRROR:-https://dl.google.com/go}"
   tarball="go${want}.linux-${arch}.tar.gz"
   tmp="$(mktemp -d)"
   stage="$GO_HOME.install.$$"
   step "installing Go $want into $GO_HOME"
   info "download $base/$tarball"
   curl -fsSL --retry 3 -o "$tmp/$tarball" "$base/$tarball" || fail "download failed: $base/$tarball"
-  want_sha="$(curl -fsSL -m 30 "$base/$tarball.sha256" 2>/dev/null | awk '{print $1}')"
+  want_sha="$(curl -fsSL -m 30 "$sha_base/$tarball.sha256" 2>/dev/null | awk '{print $1}')"
+  # Guard against endpoints answering with an HTML page (HTTP 200).
+  printf '%s' "$want_sha" | grep -qE '^[0-9a-f]{64}$' || want_sha=""
   got_sha="$(sha256sum "$tmp/$tarball" | awk '{print $1}')"
   if [ -n "$want_sha" ]; then
-    [ "$want_sha" = "$got_sha" ] || { rm -rf "$tmp" "$stage"; fail "sha256 mismatch for $tarball"; }
+    if [ "$want_sha" != "$got_sha" ]; then
+      warn "sha256 mismatch for $tarball, re-downloading once"
+      curl -fsSL --retry 3 -o "$tmp/$tarball" "$base/$tarball" || fail "download failed: $base/$tarball"
+      got_sha="$(sha256sum "$tmp/$tarball" | awk '{print $1}')"
+    fi
+    [ "$want_sha" = "$got_sha" ] || { rm -rf "$tmp" "$stage"; fail "sha256 mismatch for $tarball
+       want ${want_sha:0:16}… from $sha_base
+       got  ${got_sha:0:16}… in the downloaded file"; }
     ok "sha256 verified"
   else
-    warn "no .sha256 published for $tarball; continuing unverified"
+    warn "no usable .sha256 for $tarball; continuing unverified"
   fi
   mkdir -p "$stage"
   tar -C "$stage" --strip-components=1 -xzf "$tmp/$tarball"
