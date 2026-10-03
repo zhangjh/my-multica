@@ -67,7 +67,7 @@ CLI_DEST="${MULTICA_CLI_DEST:-$HOME/.local/bin/multica}"
 GO_HOME="${MULTICA_GO_HOME:-$HOME/go/go}"
 PGDATA_DIR="${MULTICA_PGDATA:-$DATA/pgdata}"
 NATIVE_PG_PORT="${MULTICA_PG_PORT:-5433}"   # resolved against DATABASE_URL in load_env
-DB_MODE="${MULTICA_DB_MODE:-auto}"          # auto | container | native | external
+DB_MODE="${MULTICA_DB_MODE:-auto}"          # auto | container | native | external (re-resolved in load_env)
 AUTO_GO="${MULTICA_AUTO_INSTALL_GO:-1}"
 LOG_MAX_BYTES="${MULTICA_LOG_MAX_BYTES:-52428800}"   # rotate a service log past 50 MB
 HEALTH_TIMEOUT="${MULTICA_HEALTH_TIMEOUT:-90}"
@@ -75,6 +75,7 @@ SYSTEMD_DIR="${MULTICA_SYSTEMD_DIR:-/etc/systemd/system}"
 USER_UNIT_DIR="${MULTICA_USER_UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
 STOP_TIMEOUT="${MULTICA_STOP_TIMEOUT:-20}"
 PG_BOOTSTRAP="${MULTICA_DB_BOOTSTRAP:-0}"   # 1 = allow creating role/database
+AUTO_PG="${MULTICA_AUTO_INSTALL_PG:-1}"     # 1 = install PostgreSQL >= 15 via the OS package manager when missing
 COMPOSE_FILES=(
   "$ROOT/docker-compose.selfhost.yml"
   "$ROOT/docker-compose.selfhost.build.yml"
@@ -364,6 +365,10 @@ load_env() {
     printf -v "$k" '%s' "${incoming[$k]}"
     export "${k?}"
   done
+  # DB_MODE and PG_BOOTSTRAP were defaulted at the top of this script, before
+  # .env was sourced — re-resolve them here so the .env values take effect.
+  DB_MODE="${MULTICA_DB_MODE:-auto}"
+  PG_BOOTSTRAP="${MULTICA_DB_BOOTSTRAP:-0}"
   BACKEND_PORT="${BACKEND_PORT:-${API_PORT:-${SERVER_PORT:-${PORT:-8080}}}}"
   WEB_PORT="${FRONTEND_PORT:-3010}"
   DB_URL="${DATABASE_URL:-}"
@@ -442,22 +447,163 @@ db_container_ensure() {
   db_wait_ready
 }
 
-db_native_ensure() {
-  step "database (native cluster at $PGDATA_DIR)"
-  local pgctl="" initdb_bin cand
+# Echo the pg_ctl path, or nothing when PostgreSQL is not installed.
+resolve_pgctl() {
+  local cand pgctl=""
   for cand in "${MULTICA_PG_CTL:-}" "${PGHOME:-/nonexistent}/bin/pg_ctl" "$HOME/apps/multica-pg/bin/pg_ctl" \
               "${MULTICA_PG_HOME:-/nonexistent}/bin/pg_ctl" "/opt/multica-pg/bin/pg_ctl" \
               /usr/lib/postgresql/*/bin/pg_ctl /usr/pgsql-*/bin/pg_ctl /usr/local/pgsql/bin/pg_ctl; do
     [ -n "$cand" ] && [ -x "$cand" ] && { pgctl="$cand"; break; }
   done
   [ -n "$pgctl" ] || pgctl="$(command -v pg_ctl 2>/dev/null || true)"
-  if [ -z "$pgctl" ] && [ -d "$HOME/apps/multica-pg/bin" ]; then
+  if [ -z "$pgctl" ] && [ -x "$HOME/apps/multica-pg/bin/pg_ctl" ]; then
     export PATH="$HOME/apps/multica-pg/bin:$PATH"
     pgctl="$HOME/apps/multica-pg/bin/pg_ctl"
   fi
-  if [ -z "$pgctl" ] && [ -d "/opt/multica-pg/bin" ]; then
+  if [ -z "$pgctl" ] && [ -x "/opt/multica-pg/bin/pg_ctl" ]; then
     export PATH="/opt/multica-pg/bin:$PATH"
     pgctl="/opt/multica-pg/bin/pg_ctl"
+  fi
+  printf '%s' "$pgctl"
+}
+
+# Major version of a pg_ctl binary: "16" for "pg_ctl (PostgreSQL 16.4 ...)".
+pg_major() { "$1" --version 2>/dev/null | sed -n 's/.* \([0-9][0-9]*\)\..*/\1/p'; }
+
+# Run "$@" as the postgres OS user (the pristine check below relies on peer
+# auth over the local socket, which needs this).
+as_postgres() {
+  local sudo_cmd="$1"; shift
+  if [ -n "$sudo_cmd" ]; then "$sudo_cmd" -u postgres "$@"
+  else su -s /bin/sh postgres -c "$*"; fi
+}
+
+# Add the official PostgreSQL APT repository and install postgresql-17.
+# Used on Debian/Ubuntu when the distro package is older than 15.
+pgdg_install_17() {
+  local sudo_cmd="$1" codename="$2"
+  [ -n "$codename" ] || { warn "cannot determine the distro codename for the PGDG repo"; return 1; }
+  $sudo_cmd apt-get install -y -qq curl ca-certificates || return 1
+  $sudo_cmd install -d -m 0755 /usr/share/postgresql-common/pgdg
+  $sudo_cmd curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+    https://www.postgresql.org/media/keys/ACCC4CF8.asc || return 1
+  printf 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt %s-pgdg main\n' \
+    "$codename" | $sudo_cmd tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+  $sudo_cmd apt-get update -qq || return 1
+  DEBIAN_FRONTEND=noninteractive $sudo_cmd apt-get install -y -qq postgresql-17
+}
+
+# The distro package may have auto-started a default cluster on our port.
+# Native mode means this script owns the database lifecycle, so take the port
+# over — but only when that cluster is pristine (no user databases); anything
+# else is left alone and reported.
+reclaim_pg_port() {
+  local pgctl="$1" sudo_cmd="$2" psql dbs
+  tcp_ready 127.0.0.1 "$NATIVE_PG_PORT" || return 0
+  psql="$(dirname "$pgctl")/psql"
+  [ -x "$psql" ] || { warn "psql not found next to $pgctl; cannot inspect the listener on port $NATIVE_PG_PORT"; return 1; }
+  dbs="$(as_postgres "$sudo_cmd" "$psql" -tAc \
+    "select count(*) from pg_database where not datistemplate and datname <> 'postgres'" 2>/dev/null || echo '?')"
+  case "$dbs" in
+    0)
+      step "the distro's empty default cluster is on port $NATIVE_PG_PORT — stopping it"
+      if ! $sudo_cmd systemctl stop postgresql 2>/dev/null; then
+        local ver; ver="$(pg_lsclusters 2>/dev/null | awk 'NR>1 {print $1; exit}')"
+        [ -n "$ver" ] && $sudo_cmd pg_ctlcluster "$ver" main stop 2>/dev/null \
+          || { warn "could not stop the distro cluster on port $NATIVE_PG_PORT"; return 1; }
+      fi
+      if ! $sudo_cmd systemctl disable postgresql 2>/dev/null; then
+        if [ -x /usr/sbin/update-rc.d ] &&
+           $sudo_cmd update-rc.d postgresql disable 2>/dev/null; then
+          : # disabled via sysvinit
+        else
+          warn "could not disable the distro postgresql service; it may grab port $NATIVE_PG_PORT after a reboot"
+        fi
+      fi
+      ;;
+    '?')
+      warn "cannot inspect the PostgreSQL cluster listening on port $NATIVE_PG_PORT"
+      return 1
+      ;;
+    *)
+      warn "port $NATIVE_PG_PORT is held by a PostgreSQL cluster with $dbs user database(s); leaving it alone"
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# Install PostgreSQL >= 15 when no pg_ctl exists yet. Sets INSTALLED_PGCTL
+# (empty when the install is disabled or failed); returns non-zero on failure
+# so the caller can fail with guidance.
+install_postgres_native() {
+  INSTALLED_PGCTL=""
+  if [ "${AUTO_PG:-1}" != "1" ]; then
+    warn "automatic PostgreSQL install is disabled (MULTICA_AUTO_INSTALL_PG=0)"
+    return 1
+  fi
+  local sudo_cmd=""
+  if [ "$(id -u)" -ne 0 ]; then
+    have sudo || { warn "cannot install PostgreSQL: not root and sudo is not available"; return 1; }
+    sudo_cmd="sudo"
+  fi
+  local os_id="" os_like="" codename=""
+  if [ -f /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    os_id="$(. /etc/os-release; printf '%s' "${ID:-}")"
+    os_like="$(. /etc/os-release; printf '%s' "${ID_LIKE:-}")"
+    codename="$(. /etc/os-release; printf '%s' "${VERSION_CODENAME:-}")"
+  fi
+  step "installing PostgreSQL (>= 15) via the OS package manager"
+  case " $os_id $os_like " in
+    *" debian "*|*" ubuntu "*)
+      $sudo_cmd apt-get update -qq || { warn "apt-get update failed"; return 1; }
+      DEBIAN_FRONTEND=noninteractive $sudo_cmd apt-get install -y -qq postgresql \
+        || { warn "apt-get install postgresql failed"; return 1; }
+      local pgctl major
+      pgctl="$(resolve_pgctl)"; major="$(pg_major "$pgctl")"
+      if [ -n "$major" ] && [ "$major" -lt 15 ]; then
+        warn "distro PostgreSQL is $major (< 15; migrations need 15+); installing postgresql-17 from the PGDG repo"
+        pgdg_install_17 "$sudo_cmd" "$codename" || return 1
+      fi
+      ;;
+    *" rhel "*|*" centos "*|*" fedora "*|*" rocky "*|*" alma "*|*" amzn "*)
+      if have dnf; then $sudo_cmd dnf install -y -q postgresql-server
+      else $sudo_cmd yum install -y -q postgresql-server; fi \
+        || { warn "postgresql-server install failed"; return 1; }
+      ;;
+    *" alpine "*)
+      $sudo_cmd apk add --no-cache -q postgresql16 2>/dev/null \
+        || $sudo_cmd apk add --no-cache -q postgresql \
+        || { warn "apk install failed"; return 1; }
+      ;;
+    *)
+      warn "unsupported distro '${os_id:-unknown}' for automatic PostgreSQL install"
+      return 1
+      ;;
+  esac
+  INSTALLED_PGCTL="$(resolve_pgctl)"
+  [ -n "$INSTALLED_PGCTL" ] || { warn "package installed but pg_ctl is still not found"; return 1; }
+  local pgver; pgver="$(pg_major "$INSTALLED_PGCTL")"
+  if [ -n "$pgver" ] && [ "$pgver" -lt 15 ]; then
+    warn "installed PostgreSQL is $pgver (< 15); migrations need 15+"
+    INSTALLED_PGCTL=""
+    return 1
+  fi
+  reclaim_pg_port "$INSTALLED_PGCTL" "$sudo_cmd" || return 1
+  ok "PostgreSQL ${pgver:-?} ready ($(dirname "$INSTALLED_PGCTL"))"
+  return 0
+}
+
+db_native_ensure() {
+  step "database (native cluster at $PGDATA_DIR)"
+  local pgctl initdb_bin
+  pgctl="$(resolve_pgctl)"
+  if [ -z "$pgctl" ]; then
+    install_postgres_native || fail "PostgreSQL is not installed and the automatic install failed (see warnings above).
+       Install PostgreSQL >= 15 yourself and point MULTICA_PG_CTL at its pg_ctl,
+       or re-run with MULTICA_AUTO_INSTALL_PG=1"
+    pgctl="$INSTALLED_PGCTL"
   fi
   [ -n "$pgctl" ] || fail "no pg_ctl found; set MULTICA_PG_CTL or install PostgreSQL >= 15
        (migrations use NULLS NOT DISTINCT, which needs 15+; upstream ships pg17)"
@@ -480,7 +626,8 @@ db_native_ensure() {
       fi
       # 9>&- keeps the run lock out of the postmaster; see launch().
       "$pgctl" -D "$PGDATA_DIR" -l "$LOG_DIR/postgres.log" \
-        -o "-p $NATIVE_PG_PORT -c listen_addresses=127.0.0.1" start >/dev/null 9>&-
+        -o "-p $NATIVE_PG_PORT -c listen_addresses=127.0.0.1" start >/dev/null 9>&- \
+        || fail "pg_ctl could not start the new cluster (is port $NATIVE_PG_PORT taken?) — see $LOG_DIR/postgres.log"
       ok "cluster initialised on 127.0.0.1:$NATIVE_PG_PORT"
     else
       fail "no cluster at $PGDATA_DIR. Create one with:
@@ -491,7 +638,8 @@ db_native_ensure() {
   else
     "$pgctl" -D "$PGDATA_DIR" status >/dev/null 2>&1 \
       || "$pgctl" -D "$PGDATA_DIR" -l "$LOG_DIR/postgres.log" \
-         -o "-p $NATIVE_PG_PORT -c listen_addresses=127.0.0.1" start >/dev/null 9>&-
+         -o "-p $NATIVE_PG_PORT -c listen_addresses=127.0.0.1" start >/dev/null 9>&- \
+      || fail "pg_ctl could not start the cluster (is port $NATIVE_PG_PORT taken?) — see $LOG_DIR/postgres.log"
     ok "cluster running on 127.0.0.1:$DB_PORT"
   fi
   db_wait_ready
