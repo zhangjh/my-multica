@@ -65,10 +65,12 @@ SERVER_BIN="$ROOT/server/bin"
 WEB_DIR="$ROOT/apps/web"
 CLI_DEST="${MULTICA_CLI_DEST:-$HOME/.local/bin/multica}"
 GO_HOME="${MULTICA_GO_HOME:-$HOME/go/go}"
+NODE_HOME="${MULTICA_NODE_HOME:-$HOME/node/node}"
 PGDATA_DIR="${MULTICA_PGDATA:-$DATA/pgdata}"
 NATIVE_PG_PORT="${MULTICA_PG_PORT:-5433}"   # resolved against DATABASE_URL in load_env
 DB_MODE="${MULTICA_DB_MODE:-auto}"          # auto | container | native | external (re-resolved in load_env)
 AUTO_GO="${MULTICA_AUTO_INSTALL_GO:-1}"
+AUTO_NODE="${MULTICA_AUTO_INSTALL_NODE:-1}"   # 1 = install Node 22 + pnpm privately when missing/too old
 LOG_MAX_BYTES="${MULTICA_LOG_MAX_BYTES:-52428800}"   # rotate a service log past 50 MB
 HEALTH_TIMEOUT="${MULTICA_HEALTH_TIMEOUT:-90}"
 SYSTEMD_DIR="${MULTICA_SYSTEMD_DIR:-/etc/systemd/system}"
@@ -237,8 +239,19 @@ nvm_node_bin() {
 }
 
 resolve_node() {
+  local cand
   NODE_BIN="$(nvm_node_bin)"
   [ -n "$NODE_BIN" ] && export PATH="$NODE_BIN:$PATH"
+  # A private toolchain installed by install_node_toolchain wins over nvm's,
+  # the same way the private Go install wins over the distro's; an explicit
+  # MULTICA_NODE path wins over everything.
+  for cand in "${MULTICA_NODE:-}" "$NODE_HOME/bin/node"; do
+    if [ -n "$cand" ] && [ -x "$cand" ]; then
+      NODE_BIN="$(dirname "$cand")"
+      export PATH="$NODE_BIN:$PATH"
+      break
+    fi
+  done
   if have pnpm; then PNPM="$(command -v pnpm)"; return 0; fi
   if have corepack && [ -n "$NODE_BIN" ]; then
     PNPM="$NODE_BIN/pnpm"
@@ -308,7 +321,9 @@ install_go_toolchain() {
     warn "no usable .sha256 for $tarball; continuing unverified"
   fi
   mkdir -p "$stage"
-  tar -C "$stage" --strip-components=1 -xzf "$tmp/$tarball"
+  # --no-same-owner: the tarball may carry foreign uids (node's is 1000);
+  # the extracted tree must belong to the installing user.
+  tar --no-same-owner -C "$stage" --strip-components=1 -xzf "$tmp/$tarball"
   rm -rf "$tmp"
   if [ -d "$GO_HOME" ] && [ ! -L "$GO_HOME" ]; then
     mv "$GO_HOME" "$GO_HOME.bak.$(date +%Y%m%d%H%M%S)"
@@ -343,12 +358,122 @@ ensure_go() {
 
 ensure_node() {
   step "toolchain: Node / pnpm"
-  resolve_node || fail "pnpm not found; install Node >= 22 (nvm) plus pnpm ${MULTICA_PNPM_VERSION:-10}"
-  local nv; nv="$(node_version)"
-  if [ -n "$nv" ] && ! version_ge "$nv" "22.0.0"; then
-    fail "node $nv is too old; this repo needs >= 22"
+  local nv=""
+  if node_bin_usable; then
+    nv="$(node_version)"
+    if ! version_ge "$nv" "22.0.0"; then
+      if [ "${AUTO_NODE:-1}" = "1" ]; then
+        warn "node $nv is too old; installing a private Node 22 (this repo needs >= 22)"
+        install_node_toolchain
+        node_bin_usable || fail "node still not usable after install"
+        nv="$(node_version)"
+      else
+        fail "node $nv is too old; this repo needs >= 22 (set MULTICA_AUTO_INSTALL_NODE=1 to auto-install)"
+      fi
+    fi
+  else
+    if [ "${AUTO_NODE:-1}" != "1" ]; then
+      fail "node not found; install Node >= 22 (nvm), or set MULTICA_AUTO_INSTALL_NODE=1"
+    fi
+    install_node_toolchain
+    node_bin_usable || fail "node still not usable after install"
+    nv="$(node_version)"
   fi
-  ok "node ${nv:-?} ($(command -v node)), pnpm $("$PNPM" --version 2>/dev/null || echo '?')"
+  version_ge "${nv:-0}" "22.0.0" || fail "node ${nv:-?} is too old; this repo needs >= 22"
+  ensure_pnpm || fail "pnpm not found and could not be provisioned (tried corepack and npm -g)"
+  resolve_node || fail "pnpm resolution failed after provisioning"
+  ok "node ${nv:-?} ($(command -v node)), pnpm $(pnpm --version 2>/dev/null || echo '?')"
+}
+
+# Node binary resolution without the pnpm requirement: nvm, then the private
+# toolchain, then an explicit MULTICA_NODE path. Sets NODE_BIN and PATH.
+node_bin_usable() {
+  local cand
+  NODE_BIN="$(nvm_node_bin)"
+  [ -n "$NODE_BIN" ] && export PATH="$NODE_BIN:$PATH"
+  for cand in "${MULTICA_NODE:-}" "$NODE_HOME/bin/node"; do
+    if [ -n "$cand" ] && [ -x "$cand" ]; then
+      NODE_BIN="$(dirname "$cand")"
+      export PATH="$NODE_BIN:$PATH"
+      break
+    fi
+  done
+  [ -n "$NODE_BIN" ] && have node
+}
+
+# Resolve "22" to the newest 22.x.y from nodejs.org; pass through "22.14.0".
+node_resolve_version() {
+  case "$1" in
+    *.*.*) printf '%s' "$1"; return 0 ;;
+  esac
+  curl -fsSL -m 30 https://nodejs.org/dist/index.json 2>/dev/null \
+    | grep -o '"version":"v'"$1"'\.[0-9][0-9.]*"' | head -n1 \
+    | sed 's/.*"version":"v//;s/"//'
+}
+
+install_node_toolchain() {
+  local want ver arch dist base tmp stage want_sha got_sha
+  want="${MULTICA_NODE_VERSION:-22}"
+  ver="$(node_resolve_version "$want")"
+  [ -n "$ver" ] || fail "could not resolve Node $want from https://nodejs.org/dist/index.json"
+  [ "$ver" = "$want" ] || info "latest Node $want is v$ver"
+  case "$(uname -m)" in
+    x86_64|amd64) arch=x64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) fail "unsupported architecture $(uname -m) for the Node toolchain" ;;
+  esac
+  dist="node-v${ver}-linux-${arch}.tar.xz"
+  base="${MULTICA_NODE_MIRROR:-https://nodejs.org/dist}"
+  tmp="$(mktemp -d)"
+  stage="$NODE_HOME.install.$$"
+  step "installing Node v$ver into $NODE_HOME"
+  info "download $base/v$ver/$dist"
+  curl -fsSL --retry 3 -o "$tmp/$dist" "$base/v$ver/$dist" || fail "download failed: $base/v$ver/$dist"
+  want_sha="$(curl -fsSL -m 30 "$base/v$ver/SHASUMS256.txt" 2>/dev/null | awk -v d="$dist" '$2==d{print $1}')"
+  # Guard against endpoints answering with an HTML page (HTTP 200).
+  printf '%s' "$want_sha" | grep -qE '^[0-9a-f]{64}$' || want_sha=""
+  got_sha="$(sha256sum "$tmp/$dist" | awk '{print $1}')"
+  if [ -n "$want_sha" ]; then
+    [ "$want_sha" = "$got_sha" ] || { rm -rf "$tmp" "$stage"; fail "sha256 mismatch for $dist"; }
+    ok "sha256 verified"
+  else
+    warn "no usable SHASUMS256 for $dist; continuing unverified"
+  fi
+  mkdir -p "$stage"
+  tar --no-same-owner -C "$stage" --strip-components=1 -xf "$tmp/$dist"
+  rm -rf "$tmp"
+  if [ -d "$NODE_HOME" ] && [ ! -L "$NODE_HOME" ]; then
+    mv "$NODE_HOME" "$NODE_HOME.bak.$(date +%Y%m%d%H%M%S)"
+    info "previous toolchain kept at $NODE_HOME.bak.*"
+  fi
+  mkdir -p "$(dirname "$NODE_HOME")"
+  mv "$stage" "$NODE_HOME"
+  export PATH="$NODE_HOME/bin:$PATH"
+  ok "Node $(node --version 2>/dev/null) installed ($NODE_HOME/bin/node)"
+}
+
+# pnpm without sudo: corepack first (bundled with Node), npm -g as fallback.
+# Both target user-owned directories, never the system.
+ensure_pnpm() {
+  have pnpm && { PNPM="$(command -v pnpm)"; return 0; }
+  local pnpm_ver="${MULTICA_PNPM_VERSION:-10}"
+  if have corepack; then
+    step "provisioning pnpm $pnpm_ver via corepack"
+    corepack enable >/dev/null 2>&1
+    if corepack prepare "pnpm@$pnpm_ver" --activate >/dev/null 2>&1; then
+      hash -r
+      if have pnpm; then PNPM="$(command -v pnpm)"; ok "pnpm $(pnpm --version 2>/dev/null)"; return 0; fi
+    fi
+    warn "corepack provisioning failed, trying npm"
+  fi
+  have npm || return 1
+  step "installing pnpm $pnpm_ver via npm -g"
+  npm install -g "pnpm@$pnpm_ver" >/dev/null 2>&1 || return 1
+  hash -r
+  have pnpm || return 1
+  PNPM="$(command -v pnpm)"
+  ok "pnpm $(pnpm --version 2>/dev/null)"
+  return 0
 }
 
 # ---------------------------------------------------------------------------
