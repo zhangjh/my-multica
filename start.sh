@@ -867,14 +867,113 @@ db_ensure() {
   if tcp_ready "$DB_HOST" "$DB_PORT"; then
     step "database"
     ok "reachable at $DB_HOST:$DB_PORT/$DB_NAME (mode: $mode)"
+  else
+    case "$mode" in
+      container) db_container_ensure ;;
+      native) db_native_ensure ;;
+      *) fail "cannot reach the database at $DB_HOST:$DB_PORT/$DB_NAME
+       check DATABASE_URL in $ENV_FILE, or set MULTICA_DB_MODE=container|native" ;;
+    esac
+  fi
+  # A reachable port is not a ready database: on a native cluster the
+  # DATABASE_URL role/database may still be missing (fresh host, or a cluster
+  # that predates this script). External databases are left untouched.
+  if [ "$mode" = "native" ]; then
+    db_native_bootstrap
+  fi
+}
+
+# Ping $3 over TCP with the application's own credentials from DATABASE_URL.
+db_tcp_ping() {
+  local psql="$1" db_pass="$2" dbname="$3" out
+  if [ -n "$db_pass" ]; then
+    out="$(PGPASSWORD="$db_pass" "$psql" -h 127.0.0.1 -p "$NATIVE_PG_PORT" \
+      -U "$DB_USER" -d "$dbname" -tAc "SELECT 1" 2>&1)" || return 1
+  else
+    out="$("$psql" -h 127.0.0.1 -p "$NATIVE_PG_PORT" \
+      -U "$DB_USER" -d "$dbname" -tAc "SELECT 1" 2>&1)" || return 1
+  fi
+  [ "$out" = "1" ]
+}
+
+# Ping the maintenance database over the cluster's own unix socket (peer auth).
+db_socket_ping() {
+  local psql="$1" out
+  out="$("$psql" -h "$RUN_DIR" -U "$DB_USER" -d postgres -tAc "SELECT 1" 2>&1)" || return 1
+  [ "$out" = "1" ]
+}
+
+# Run psql as a superuser against the maintenance database.
+# $1=psql $2=db_pass $3=mode(tcp|socket); the rest are psql arguments.
+db_super_psql() {
+  local psql="$1" db_pass="$2" mode="$3"; shift 3
+  if [ "$mode" = "tcp" ]; then
+    PGPASSWORD="$db_pass" "$psql" -h 127.0.0.1 -p "$NATIVE_PG_PORT" -U "$DB_USER" -d postgres "$@"
+  else
+    "$psql" -h "$RUN_DIR" -U "$DB_USER" -d postgres "$@"
+  fi
+}
+
+# Ensure the DATABASE_URL role and database exist on a native cluster.
+# Idempotent: CREATEs only what is missing, never touches existing objects.
+db_native_bootstrap() {
+  local pgctl psql db_pass mode="" stmts stmt
+  [ -n "$DB_USER" ] || fail "DATABASE_URL has no user component"
+  [ -n "$DB_NAME" ] || fail "DATABASE_URL has no database component"
+  pgctl="$(resolve_pgctl)"
+  [ -n "$pgctl" ] || { warn "pg_ctl not found; skipping role/database bootstrap"; return 0; }
+  psql="$(dirname "$pgctl")/psql"
+  [ -x "$psql" ] || { warn "psql not found next to $pgctl; skipping role/database bootstrap"; return 0; }
+  db_pass="$(url_component "$DB_URL" pass)"
+  if db_tcp_ping "$psql" "$db_pass" "$DB_NAME"; then
+    ok "database $DB_NAME is ready for role $DB_USER"
     return 0
   fi
-  case "$mode" in
-    container) db_container_ensure ;;
-    native) db_native_ensure ;;
-    *) fail "cannot reach the database at $DB_HOST:$DB_PORT/$DB_NAME
-       check DATABASE_URL in $ENV_FILE, or set MULTICA_DB_MODE=container|native" ;;
-  esac
+  step "creating role \"$DB_USER\" / database \"$DB_NAME\" if missing"
+  # DDL needs a superuser connection: TCP with the URL password first (the
+  # standard native setup — initdb stores it via --pwfile), then the local
+  # socket as a fallback.
+  if [ -n "$db_pass" ] && db_tcp_ping "$psql" "$db_pass" postgres; then
+    mode=tcp
+  elif db_socket_ping "$psql"; then
+    mode=socket
+  else
+    fail "cannot connect to PostgreSQL as a superuser, so role \"$DB_USER\" /
+       database \"$DB_NAME\" cannot be created automatically. Create them once
+       as the postgres OS user:
+       $psql -d postgres -c \"CREATE ROLE \\\"$DB_USER\\\" WITH LOGIN SUPERUSER PASSWORD '<from DATABASE_URL>';\"
+       $psql -d postgres -c \"CREATE DATABASE \\\"$DB_NAME\\\" OWNER \\\"$DB_USER\\\";\""
+  fi
+  # :'var' substitution plus server-side format(%I) keeps arbitrary names safe.
+  stmts="$(db_super_psql "$psql" "$db_pass" "$mode" -v r="$DB_USER" -v d="$DB_NAME" -tA <<'SQL'
+SELECT format('CREATE ROLE %I WITH LOGIN SUPERUSER', :'r')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'r')
+UNION ALL
+SELECT format('CREATE DATABASE %I OWNER %I', :'d', :'r')
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'d');
+SQL
+)" || fail "database bootstrap query failed"
+  while IFS= read -r stmt; do
+    [ -n "$stmt" ] || continue
+    dim "db: $stmt"
+    db_super_psql "$psql" "$db_pass" "$mode" -q -c "$stmt" >/dev/null \
+      || fail "database bootstrap failed while running: $stmt"
+  done <<<"$stmts"
+  # Keep the cluster's password in sync with DATABASE_URL (the source of truth).
+  # Note: psql only interpolates :'var' for stdin input, not for -c strings,
+  # so the SELECT goes through a heredoc; the rendered statement (no :'var'
+  # left) is then executed via -c.
+  if [ -n "$db_pass" ]; then
+    stmt="$(db_super_psql "$psql" "$db_pass" "$mode" -v r="$DB_USER" -v p="$db_pass" -tA <<'SQL'
+SELECT format('ALTER ROLE %I PASSWORD %L', :'r', :'p');
+SQL
+)" || fail "database bootstrap failed while setting the role password"
+    [ -n "$stmt" ] && db_super_psql "$psql" "$db_pass" "$mode" -q -c "$stmt" >/dev/null
+    dim "db: role \"$DB_USER\" password synced with DATABASE_URL"
+  fi
+  db_tcp_ping "$psql" "$db_pass" "$DB_NAME" \
+    || fail "database \"$DB_NAME\" is still not reachable for role \"$DB_USER\" after bootstrap"
+  ok "database $DB_NAME is ready for role $DB_USER"
 }
 
 # ---------------------------------------------------------------------------
