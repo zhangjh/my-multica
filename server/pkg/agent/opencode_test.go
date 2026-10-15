@@ -797,6 +797,139 @@ func TestOpencodeProcessEventsMultiStepHappyPath(t *testing.T) {
 	close(ch)
 }
 
+// ── OpenCode 2.x dangling final step (ZHANG-46) ──
+//
+// OpenCode 2.x's `run` client omits the step_finish that closes the final step
+// whenever that step follows a "tool-calls" continuation, so every multi-step —
+// i.e. every agentic — 2.x turn ends with the last step still open at EOF. Live
+// probed against 2.0.29, the shape is always:
+//
+//	step_start → tool_use → step_finish("tool-calls") → step_start → text → EOF
+//
+// The 1.x wire contract always closes its steps, so the strict "step still open
+// at EOF" guard stays meaningful for 1.x; on 2.x that same shape is an ordinary
+// completion. These cases pin the boundary: tolerate the 2.x dangling step when
+// it produced something, and keep failing everything else.
+
+// v2DanglingTurn is the multi-step turn above as a minimal, ordered event list.
+// It is the fixture every case below shares so the only thing that varies is
+// the runtime profile and the shape of the last step.
+var v2DanglingTurn = []string{
+	`{"type":"step_start","timestamp":1000,"sessionID":"ses_v2dangling","part":{"type":"step-start"}}`,
+	`{"type":"tool_use","timestamp":1001,"sessionID":"ses_v2dangling","part":{"type":"tool","tool":"bash","callID":"call_1","state":{"status":"completed","input":{"command":"echo hi"},"output":"hi\n"}}}`,
+	`{"type":"step_finish","timestamp":1002,"sessionID":"ses_v2dangling","part":{"type":"step-finish","reason":"tool-calls","tokens":{"input":41,"output":27,"cache":{"write":0,"read":5056}}}}`,
+	`{"type":"step_start","timestamp":1003,"sessionID":"ses_v2dangling","part":{"type":"step-start"}}`,
+	`{"type":"text","timestamp":1004,"sessionID":"ses_v2dangling","part":{"type":"text","text":"answer"}}`,
+}
+
+func TestOpencodeProcessEventsV2DanglingFinalStepIsCompleted(t *testing.T) {
+	t.Parallel()
+
+	// The 2.x runtime: an earlier step closed and the dangling final step
+	// delivered text, so EOF on the open step is a completion, not a truncation.
+	b := &opencodeBackend{cfg: Config{Logger: slog.Default(), BuiltinRuntime: true, CLIVersion: "opencode v2.0.29"}}
+	ch := make(chan Message, 256)
+
+	result := b.processEvents(strings.NewReader(strings.Join(v2DanglingTurn, "\n")), ch)
+
+	if result.status != "completed" {
+		t.Errorf("status: got %q, want %q (a 2.x multi-step turn ends on a dangling step)", result.status, "completed")
+	}
+	if result.errMsg != "" {
+		t.Errorf("errMsg: got %q, want empty", result.errMsg)
+	}
+	if result.noTerminalSignal {
+		t.Error("noTerminalSignal: got true, want false")
+	}
+	if !result.sawTerminalSignal {
+		t.Error("sawTerminalSignal: got false, want true (an earlier step closed)")
+	}
+	if result.output != "answer" {
+		t.Errorf("output: got %q, want %q", result.output, "answer")
+	}
+
+	close(ch)
+}
+
+func TestOpencodeProcessEventsV2DanglingVoidFinalStepFails(t *testing.T) {
+	t.Parallel()
+
+	// Same 2.x runtime, but the dangling step produced nothing: no text, no
+	// tool call, no usage. That is the dead-stream shape the guard exists to
+	// catch (#6522) and the dangling-step tolerance must not swallow it.
+	b := &opencodeBackend{cfg: Config{Logger: slog.Default(), BuiltinRuntime: true, CLIVersion: "opencode v2.0.29"}}
+	ch := make(chan Message, 256)
+
+	lines := strings.Join(v2DanglingTurn[:4], "\n") // the shared turn without its final text event
+
+	result := b.processEvents(strings.NewReader(lines), ch)
+
+	if result.status != "failed" {
+		t.Errorf("status: got %q, want %q (a dangling step with nothing to show for it is a dead stream)", result.status, "failed")
+	}
+	if !strings.Contains(result.errMsg, "terminal signal") {
+		t.Errorf("errMsg: got %q, want it to mention the missing terminal signal", result.errMsg)
+	}
+	if !result.noTerminalSignal {
+		t.Error("noTerminalSignal: got false, want true")
+	}
+
+	close(ch)
+}
+
+func TestOpencodeProcessEventsV2FirstStepDanglingFails(t *testing.T) {
+	t.Parallel()
+
+	// A 2.x run that dies on its very first step never closed any step, so the
+	// dangling step is not the multi-step completion shape. With no earlier
+	// step_finish the tolerance does not apply and the run still fails.
+	b := &opencodeBackend{cfg: Config{Logger: slog.Default(), BuiltinRuntime: true, CLIVersion: "opencode v2.0.29"}}
+	ch := make(chan Message, 256)
+
+	lines := strings.Join([]string{
+		`{"type":"step_start","timestamp":1000,"sessionID":"ses_v2first","part":{"type":"step-start"}}`,
+		`{"type":"text","timestamp":1001,"sessionID":"ses_v2first","part":{"type":"text","text":"let me plan the work..."}}`,
+	}, "\n")
+
+	result := b.processEvents(strings.NewReader(lines), ch)
+
+	if result.status != "failed" {
+		t.Errorf("status: got %q, want %q (no earlier step closed, so the run did not finish)", result.status, "failed")
+	}
+	if !strings.Contains(result.errMsg, "terminal signal") {
+		t.Errorf("errMsg: got %q, want it to mention the missing terminal signal", result.errMsg)
+	}
+	if result.output != "let me plan the work..." {
+		t.Errorf("output: got %q, want the text emitted before the stream died", result.output)
+	}
+
+	close(ch)
+}
+
+func TestOpencodeProcessEventsV1DanglingFinalStepStillFails(t *testing.T) {
+	t.Parallel()
+
+	// The 1.x wire contract always closes its steps, so the identical event
+	// sequence on a 1.x runtime still means the provider stream died mid-step.
+	// The tolerance is scoped to the 2.x contract and must not weaken 1.x.
+	b := &opencodeBackend{cfg: Config{Logger: slog.Default(), BuiltinRuntime: true, CLIVersion: "1.19.0"}}
+	ch := make(chan Message, 256)
+
+	result := b.processEvents(strings.NewReader(strings.Join(v2DanglingTurn, "\n")), ch)
+
+	if result.status != "failed" {
+		t.Errorf("status: got %q, want %q (1.x always closes its steps)", result.status, "failed")
+	}
+	if !strings.Contains(result.errMsg, "terminal signal") {
+		t.Errorf("errMsg: got %q, want it to mention the missing terminal signal", result.errMsg)
+	}
+	if !result.noTerminalSignal {
+		t.Error("noTerminalSignal: got false, want true")
+	}
+
+	close(ch)
+}
+
 func TestOpencodeProcessEventsStreamEndsAfterToolCallsStepFinish(t *testing.T) {
 	t.Parallel()
 
