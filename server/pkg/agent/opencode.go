@@ -612,9 +612,17 @@ func (b *opencodeBackend) processEvents(r io.Reader, ch chan<- Message) eventRes
 	// all means the run did not finish: its provider stream died and
 	// `opencode run` exited without emitting an error event. Fail closed on
 	// that structural evidence rather than reporting a false-green completion.
+	//
+	// OpenCode 2.x is the exception: its `run` client structurally omits the
+	// step_finish that closes the final step whenever that step follows a
+	// "tool-calls" continuation (see opencodeV2DanglingFinalStep), so the strict
+	// reading of the shape below would fail every multi-step — i.e. every
+	// agentic — 2.x turn.
 	noTerminalSignal := false
 	if finalStatus == "completed" {
 		switch {
+		case openStep && opencodeV2DanglingFinalStep(b.cfg, sawStepFinish, stepProducedOutput):
+			// Tolerated 2.x completion: keep the run green.
 		case openStep:
 			finalStatus = "failed"
 			finalError = "opencode stream ended without a terminal signal (step still open at EOF)"

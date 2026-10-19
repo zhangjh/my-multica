@@ -69,6 +69,52 @@ func opencodeUsesV2Contract(cfg Config) bool {
 	return version.Major >= 2
 }
 
+// opencodeV2DanglingFinalStep reports whether EOF on a still-open step is the
+// expected shape of a *completed* OpenCode 2.x turn rather than evidence that
+// the provider stream died mid-step.
+//
+// OpenCode 2.x's `run` client stops at the end of a turn and never emits the
+// step_finish that closes the final step when that step follows a "tool-calls"
+// continuation. Live-probed against 2.0.29, every multi-step run ends like this
+// (a two-step turn, verbatim):
+//
+//	step_start → tool_use → step_finish("tool-calls") → step_start → text → EOF
+//
+// while a single-step run does emit its closing step_finish. Multi-step is the
+// normal shape for an agentic turn, so reading the dangling step as truncation
+// (which the 1.x wire contract requires — 1.x always closes its steps) marked
+// every successful 2.x turn `failed` with
+//
+//	opencode stream ended without a terminal signal (step still open at EOF)
+//
+// pkg/taskfailure classifies that text as agent_error.provider_network, the one
+// agent_error.* reason on internal/service/task.go's retry allowlist, so the
+// server re-dispatched the same trigger comment up to three times (MUL-4910's
+// ceiling) and the agent posted the same answer to each one — the duplicate
+// replies reported in ZHANG-46.
+//
+// Scoped deliberately, so the guard keeps the value it has on 1.x:
+//
+//   - Only runs speaking the 2.x contract are covered; a custom runtime profile
+//     or an unrecognised version string keeps the strict 1.x reading.
+//   - sawStepFinish requires that an earlier step actually closed. Without it,
+//     a run that died on its very first step would look the same, and a provider
+//     that never round-tripped anything is the shape the guard exists to catch.
+//   - stepProducedOutput requires the dangling step to have delivered something
+//     the wire protocol only emits once complete: text, a terminal tool_use
+//     (opencode emits those only on "completed"/"error" states), or a usage
+//     block. A dangling step with nothing to show for it is still a dead
+//     stream — the #6522 shape — and still fails the run.
+//
+// The trade-off is explicit: on 2.x a stream cut in the *final* step can no
+// longer be told apart from a completion, because 2.x sends both as "last step
+// open, work already delivered". Failing every turn to catch that case costs
+// more than the case itself — it duplicates user-facing replies and burns
+// three runs per comment.
+func opencodeV2DanglingFinalStep(cfg Config, sawStepFinish, stepProducedOutput bool) bool {
+	return opencodeUsesV2Contract(cfg) && sawStepFinish && stepProducedOutput
+}
+
 // opencodeModelArg folds a thinking level into the model string for the 2.x
 // contract, which has no `--variant` flag and instead reads the variant off the
 // model as `provider/model#variant`.
